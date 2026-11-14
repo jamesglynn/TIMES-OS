@@ -19,9 +19,9 @@ model's matrix instead of solving it. TIMES-OS builds the same run. Then the two
 by the rule below. Nothing is solved on either side: the matrix holds the whole model, its objective function
 included, so a solve would add only the objective value (which a model with discrete capacity needs as well, see
 below). The first line of `runs/<case>/report_<case>.txt` is the verdict: `SAME`, or `DIFFERENT` with the equations
-and variables that differ. Every release of TIMES-OS passes this check on the open
-reference models below before it is published; with it, anyone with GAMS can make the same check on a model of their
-own.
+and variables that differ. Every release passes this check on a set of cases that uses every feature of the open
+reference models below, including at least one large model; all of them are checked every month. With it, anyone
+with GAMS can make the same check on a model of their own.
 
 It needs GAMS, with a licence for the size of the model (GAMS's free licence covers small models only), and the TIMES
 source, v4.9.8, which is IEA-ETSAP's and not part of this repository

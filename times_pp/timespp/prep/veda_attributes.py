@@ -348,6 +348,12 @@ def ppm_ext(db: DB):
         db.remove("NO_ACT", select="select r, p from t_ap")
     # --- OPTION TRACKPC < RPG_1ACE; RPC_NOFLO(TRACKPC) = NO;
     db.remove("RPC_NOFLO", where="exists(select 1 from RPG_1ACE g where g.r=RPC_NOFLO.r and g.p=RPC_NOFLO.p and g.c=RPC_NOFLO.c)")
+    # --- LOOP(TRACKPC(KEEP_FLOF(R,P,C)),
+    #       IF(RPC_FFUNC(R,P,C)+TRACKPG(R,P,C),RPG_1ACE(R,P,CG,C) = NO; ELSE (QA 01: ACT_EFF is applied to the auxiliary flow)));
+    #     (a single flow of an ACT_EFF group that is also tied to the activity by a FLO_SUM / FLO_FUNC, or an emission
+    #      flow: the group is not a singleton; under REDUCE its ACT_FLO stays the one coef_ptr.mod made from COEF_PTRAN)
+    db.remove("RPG_1ACE", where="""exists(select 1 from KEEP_FLOF k where k.r=RPG_1ACE.r and k.p=RPG_1ACE.p and k.c=RPG_1ACE.c)
+                                   and (in_RPC_FFUNC(r,p,c) or exists(select 1 from t_pg t where t.r=RPG_1ACE.r and t.p=RPG_1ACE.p and t.c=RPG_1ACE.c))""")
     # --- TRACKPG(RPC_ACE) = NO; TRACKPG(TRACKPC) = NO;  RPC_EMIS(TRACKPG)=YES; RPCC_FFUNC(TRACKPG(RP,C),C) = YES;
     db.x("""delete from t_pg k where in_RPC_ACE(k.r,k.p,k.c)
             or exists(select 1 from RPG_1ACE g where g.r=k.r and g.p=k.p and g.c=k.c)""")

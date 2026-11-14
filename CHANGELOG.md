@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.4 (November 2026): WAVER, UC_TIME option -13, late revenues of decommissioning flows
+
+#### Model features
+- The run switch `WAVER YES` is supported. Residual capacities (`PRC_RESID`) and demand projections (`COM_PROJ`) take
+  for each period the weighted average of their values over the period's years. The values are filled in by straight
+  lines between the data years, and a projection is held after its last year when that is the last milestone year.
+  The weights are those TIMES uses: the discount factors with `OBLONG`, `1/D(T)` with the classic objective
+  (`fillwave.gms`; `times_pp/timespp/prep/veda_coefficients.py`, `fillwave`). Before, a model with it stopped as
+  UNSUPPORTED.
+- `UC_TIME` option -13 on year 0 is supported: it switches the user constraint off in its region, and in every
+  region of a regional sum (`UC_R_SUM`), as in TIMES (`coef_ext.vda`;
+  `times_pp/timespp/prep/veda_coefficients.py`, `coef_ext`). Before, a model with it stopped as UNSUPPORTED.
+- `NCAP_VALU` on a decommissioning flow (`NCAP_OCOM`) is supported: the value of what is released after the end of
+  the horizon goes into the salvage part of the objective, as TIMES's late revenues (`eqobsalv.mod`;
+  `times_pp/timespp/prep/objective.py`, `late_revenues`). Before, a model with it stopped as UNSUPPORTED.
+
+#### Agreement fixes
+- With `REDUCE YES`, a process whose `ACT_EFF` names a single input that is also tied to the activity by `VDA_FLOP`
+  (a capture process of CO2, say) now has that input as `VDA_FLOP` times the activity in the commodity balances, as
+  in TIMES. Before, the port took the input as equal to the activity (`ppm_ext.vda`: such a flow is not a singleton
+  `ACT_EFF` group; `times_pp/timespp/prep/veda_attributes.py`).
+
+#### Still not supported
+- Late revenues in a myopic run (`TIMESTEP`), where the salvage is made again at every step.
+
+Each agrees with TIMES in GAMS.
+
+#### Documentation
+- The verification page and the README say what each release is checked on: a set of cases that uses every feature
+  of the open reference models, including at least one large model; all of them are checked every month.
+
 ## 1.0.3 (November 2026): FLO_FUNCX shapes on capacity flows and with repeated investments
 
 #### Model features

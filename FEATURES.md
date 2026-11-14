@@ -143,7 +143,7 @@ By area, as the TIMES declarations group them; each attribute with its domain an
 | `NCAP_DLAGC`(REG,ALLYEAR,PRC,CUR) Cost of decomissioning delay | parameter | supported |
 | `NCAP_DLIFE`(REG,ALLYEAR,PRC) Time for the actual decomissioning | parameter | supported |
 | `NCAP_OCOM`(REG,ALLYEAR,PRC,COM) Commodity release during decomissioning | parameter | supported |
-| `NCAP_VALU`(REG,ALLYEAR,PRC,COM,CUR) Value of material released during decomissioning | parameter | supported, refused in some uses: late revenues of decommissioning flows (NCAP_VALU with NCAP_OCOM, eqobsalv.mod) |
+| `NCAP_VALU`(REG,ALLYEAR,PRC,COM,CUR) Value of material released during decomissioning | parameter | supported, refused in some uses: late revenues of decommissioning flows (NCAP_VALU with NCAP_OCOM) in a myopic run (TIMESTEP) |
 
 ### demands
 

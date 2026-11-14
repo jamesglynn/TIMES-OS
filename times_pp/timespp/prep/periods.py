@@ -95,7 +95,8 @@ def periods_and_years(db: DB):
     # --- OPTION PASTYEAR < NCAP_PASTI;
     db.assign("PASTYEAR", "select distinct y from NCAP_PASTI")
     # --- INT_DEFAULT('PASTI')$PYR('0')=1; PYR('0')=NO;
-    pasti_migrate = bool(db.q1("select count(*) from PASTYEAR where y='0'"))
+    #     (INT_DEFAULT('PASTI') may be set already: by init_ext.vda 60 with WAVER YES)
+    pasti_migrate = bool(db.q1("select count(*) from PASTYEAR where y='0'") or db.q1("select count(*) from INT_DEFAULT where u='PASTI'"))
     db.pasti_migrate = pasti_migrate        # read by past_vintages_and_start_years, after the timeslices
     db.remove("PASTYEAR", where="y='0'")
     if pasti_migrate:

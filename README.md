@@ -46,8 +46,9 @@ python TIMES.py run <run folder>
 - A **run folder** holds one model run: the run file (`<case>.run`) and its DD files.
 - The result is `runs/<case>/report_<case>.txt`. **Its first line is the verdict**: `SOLVED`, `UNSUPPORTED` (with the
   list of what is missing), `NOT SOLVED`, `INFEASIBLE` or `ERROR`.
-- Every commit on `main` is a release, checked against TIMES in GAMS before it is published: take `main` or a tagged
-  release, with nothing to build or check yourself. With GAMS on the machine (`setup` then fetches the TIMES source),
+- Every commit on `main` is a release, checked against TIMES in GAMS before it is published, on a set of cases that
+  uses every feature of the open reference models, including at least one large model (all of them are checked every
+  month): take `main` or a tagged release, with nothing to build or check yourself. With GAMS on the machine (`setup` then fetches the TIMES source),
   `--check` makes the same comparison on your own model ([verification](docs/verification.md)).
 
 Everything else (options, results, the extensions, runs that read an earlier run) is in the

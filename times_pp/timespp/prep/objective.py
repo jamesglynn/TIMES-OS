@@ -47,9 +47,66 @@ def objective_coefficients(db: DB):
             _objective(db)                  # (OBJ_CSIC is made only here)
         else:
             _objective_switch(db)
+        late_revenues(db)
     finally:
         if on:
             gc.enable()
+
+
+def late_revenue_inputs(db: DB):
+    """Whether a decommissioning flow (NCAP_OCOM) has a value (NCAP_VALU): the late revenues of eqobsalv.mod."""
+    return db.q1("select count(*) from NCAP_VALU v where exists(select 1 from NCAP_OCOM o where o.r=v.r and o.p=v.p and o.c=v.c)")
+
+
+def late_revenues(db: DB):
+    """The late revenues of EQ_OBJSALV (eqobsalv.mod 127-135): the value of what is released after the end of the
+    horizon by the capacity decommissioned then, in the proportion of it not already counted as salvage:
+        SUM((OBJ_SUMIII(R,V,P,LL,K,Y),COM)$((NOT Y_EOH(Y))$NCAP_OCOM(R,V,P,COM)),
+            (1-SALV_INV(R,V,P,LL)) * NCAP_VALU(R,K,P,COM,CUR) * OBJ_DISC(R,Y,CUR) *
+            (%VARV%_NCAP(R,V,P %SWS%)$MILESTONYR(V) + NCAP_PASTI(R,V,P)$PASTYEAR(V)) * NCAP_OCOM(R,V,P,COM) / OBJ_DIVIII(R,V,P))
+    In the same row, by vintage and currency, as the decommissioning surveillance term before it: added to OBJ_SALVS (the
+    salvage per unit of capacity of the terms on VAR_NCAP + NCAP_PASTI), term by term in the order of the sum."""
+    if not late_revenue_inputs(db):
+        return
+    q = db.q
+    ocom = {}
+    for r, v, p, c, x in q("select r, y, p, c, value from NCAP_OCOM order by r, yv(y), p, c"):
+        ocom.setdefault((r, v, p), []).append((c, x))
+    valu = {(r, y, p, c, cur): x for r, y, p, c, cur, x in q("select r, y, p, c, cur, value from NCAP_VALU")}
+    if not valu:
+        return
+    salv = {(r, v, p, y): x for r, v, p, y, x in q("select r, y, p, y2, value from SALV_INV")}
+    disc = {(r, y, cur): x for r, y, cur, x in q("select r, y, cur, value from OBJ_DISC")}
+    div = {(r, v, p): x for r, v, p, x in q("select r, y, p, value from OBJ_DIVIII")}
+    eoh = {y for (y,) in q("select y from Y_EOH")}
+    curs = {}
+    for r, cur in q("select r, cur from RDCUR order by r, cur"):
+        curs.setdefault(r, []).append(cur)
+    rows = {}
+    for r, v, p, ll, k, y in q("select r, y, p, y2, y3, y4 from OBJ_SUMIII order by r, yv(y), p, yv(y2), yv(y3), yv(y4)"):
+        if y in eoh or (r, v, p) not in ocom:
+            continue
+        for cur in curs.get(r, ()):
+            for c, oc in ocom[(r, v, p)]:
+                x = valu.get((r, k, p, c, cur))
+                if x is None:
+                    continue
+                rows.setdefault((r, v, p, cur), []).append((1 - salv.get((r, v, p, ll), 0.0)) * x * disc.get((r, y, cur), 0.0) * oc
+                                                          / div[(r, v, p)])
+    if not rows:
+        return
+    if "OBJ_SALVS" not in db.sym:                  # (declared by the objective only with surveillance costs, NCAP_DLAGC)
+        db.declare("OBJ_SALVS", "par", ["R", "ALLYEAR", "P", "CUR"])
+    old = {(r, v, p, cur): x for r, v, p, cur, x in q("select r, y, p, cur, value from OBJ_SALVS")}
+    out = []
+    for key, terms in rows.items():
+        tot = old.get(key, 0.0)
+        for t in terms:
+            tot += t
+        out.append((*key, tot))
+    db.x("create or replace temp table t_late (r VARCHAR, y VARCHAR, p VARCHAR, cur VARCHAR, value DOUBLE)")
+    db.insert_rows("t_late", out)
+    db.put("OBJ_SALVS", "select r, y, p, cur, value from t_late")
 
 
 def _objective(db: DB):
@@ -323,9 +380,10 @@ def _investment(db: DB, I: Inputs) -> Investment:
     sums3 = {(r, v, p) for (r, p, cur, v) in DCC if (r, v, p) in rtpset}
     # --- LOOP((RTP,COM)$NCAP_OCOM(RTP,COM),OBJ_SUMS3(RTP) = YES);
     sums3 |= {(r, int(v), p) for r, v, p in q("select distinct r, y, p from NCAP_OCOM") if (r, int(v), p) in rtpset}
-    # eqobsalv.mod LATE REVENUES: NCAP_VALU on NCAP_OCOM flows (not ported)
-    if db.q1("select count(*) from NCAP_VALU v where exists(select 1 from NCAP_OCOM o where o.r=v.r and o.p=v.p and o.c=v.c)"):
-        unsupported(db, "late revenues of decommissioning flows (NCAP_VALU with NCAP_OCOM, eqobsalv.mod)", ["NCAP_VALU"])
+    # eqobsalv.mod LATE REVENUES: NCAP_VALU on NCAP_OCOM flows (late_revenues, after the objective); in a myopic run the
+    # salvage is made again at each step (solve.stp), which these are not
+    if "TIMESTEP" in db.env and late_revenue_inputs(db):
+        unsupported(db, "late revenues of decommissioning flows (NCAP_VALU with NCAP_OCOM) in a myopic run (TIMESTEP)", ["NCAP_VALU"])
     yes = {k[:3] for k in icur} | sums3
     # Small lives are corrected because their rounded values are used as divisors (eqobjinv.mod line 65)
     # --- NCAP_DLIFE(OBJ_SUMS3(R,V,P))$(ROUND(NCAP_DLIFE(R,V,P)) LE 0) = 1;  NCAP_DELIF(OBJ_SUMS3(R,V,P)) = MAX(1,NCAP_DELIF(R,V,P));

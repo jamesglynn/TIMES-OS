@@ -4,6 +4,7 @@ from ..controls import unsupported
 from ..engine import DB
 from . import abs as abs_ext, cli, grids
 from .common import require_empty
+from .extensions import waver
 
 
 def eqashar_prep(db: DB):
@@ -163,12 +164,109 @@ def eqlducs_prep(db: DB):
                              from t_psud where lossd is not null""")
 
 
+def _vda_disc(db: DB):
+    """The weights of fillwave.gms, by region and year:
+        $ SET TMP OBJ_DISC(R,LL,CUR)/COEF_PVT(R,T);  $ IF '%CTST%'=='' $SET TMP 1/D(T)
+        IF(CARD(VDA_DISC)=0,VDA_DISC(R,MIYR_1)=1; LOOP((G_RCUR(R,CUR),T(TT+1)),VDA_DISC(R,Y_EOH(LL))$PERIODYR(T,LL)=%TMP%));
+    The first period has its first milestone year only, with weight 1; every later period the years of the period."""
+    t1 = db.q1("select y from MIYR_1")
+    yrs = db.q("""select k.y, k.y2 from PERIODYR k where in_MILESTONYR(k.y) and in_Y_EOH(k.y2)
+                  and k.y <> (select y from MILESTONYR order by yv(y) limit 1)""")
+    D = {y: v for y, v in db.q("select y, value from D")}
+    classic = db.ctl["CTST"] == ""
+    disc = {}
+    if classic:
+        w = {ll: 1 / D[t] for t, ll in yrs}
+        for (r,) in db.q("select distinct r from G_RCUR"):
+            disc[r] = dict(w)
+    else:
+        od = {(r, y, c): v for r, y, c, v in db.q("select r, y, cur, value from OBJ_DISC")}
+        pvt = {(r, y): v for r, y, v in db.q("select r, y, value from COEF_PVT")}
+        for r, cur in db.q("select r, cur from G_RCUR order by r, cur"):    # the last currency of a region wins, as in the LOOP
+            disc[r] = {ll: od.get((r, ll, cur), 0.0) / pvt[(r, t)] if pvt.get((r, t)) else 0.0 for t, ll in yrs}
+    return {"first": t1, "w": disc, "periods": yrs}
+
+
+def fillwave(db: DB, name, disc, hold):
+    """fillwave.gms (FILLWAVE: fill parameters via weighted centered averaging), for %1 = name (PRC_RESID or COM_PROJ),
+    %3 = hold:
+        OPTION REG_%2 <= %1; DONE=SMAX(T,M(T));
+        LOOP(REG_%2(R,%2), OPTION CLEAR=FIL2;
+          MY_ARRAY(DM_YEAR)=%1(R,DM_YEAR,%2); MY_F=0; Z=0;
+          LOOP(DM_YEAR(LL)$MY_ARRAY(LL),
+            LAST_VAL=MY_F; F=Z; MY_F=MY_ARRAY(LL); Z=YEARVAL(LL);
+            IF(LAST_VAL, FOR(CNT=F-Z+1 TO -1, FIL2(LL+CNT)=MY_F+(MY_F-LAST_VAL)/(Z-F)*CNT)));
+          IF(DONE=Z$%3,FIL2(Y_EOH)$(YEARVAL(Y_EOH)>Z)=MY_F);
+          %1(R,T,%2) = SUM(PERIODYR(T,Y_EOH(LL)),(MY_ARRAY(LL)+FIL2(LL))*VDA_DISC(R,LL)));
+    The values are filled densely between the data years (straight lines, from the second record on), held after the
+    last one when it is the last milestone year (COM_PROJ), and each period gets the weighted sum over its years.
+    A record given as EPS counts in the $ conditions (GAMS takes EPS as nonzero there) and as 0 in the sums; EPS+0 is
+    EPS, so the fill between two EPS records and the hold of an EPS record are EPS; a period whose sum has only EPS
+    terms is EPS."""
+    cols = db.cols(name)                                   # r, y, and the process or commodity
+    xc = cols[2]
+    done = int(db.q1("select max(value) from M where in_MILESTONYR(y)"))
+    rows = db.q(f'select r, {xc}, yv(y), value from "{name}" where in_DM_YEAR(y) order by r, {xc}, yv(y)')
+    pairs = [k for k in db.q(f'select distinct r, {xc} from "{name}" order by 1, 2')]
+    series = {}
+    for r, x, y, v in rows:
+        series.setdefault((r, x), []).append((int(y), v))
+    first, W, periods = int(disc["first"]), disc["w"], disc["periods"]
+    eoh = [int(y) for (y,) in db.q("select y from Y_EOH")]
+    by_t = {}
+    for t, ll in periods:
+        by_t.setdefault(t, []).append(int(ll))
+    T = [t for (t,) in db.q("select y from MILESTONYR order by yv(y)")]
+    out = []
+    for r, x in pairs:
+        my = dict(series.get((r, x), ()))              # MY_ARRAY: the records, EPS as 0.0
+        fil, fil_eps = {}, set()                       # FIL2, and the years where it is EPS
+        my_f, z = 0.0, 0
+        have = False                                   # LAST_VAL is a record (EPS included): IF(LAST_VAL ...)
+        for y in sorted(my):
+            last, f = my_f, z
+            my_f, z = my[y], y
+            if have:                                    # IF(LAST_VAL): true for EPS too, which is zero in the arithmetic
+                both_eps = my_f == 0.0 and last == 0.0  # EPS+0 is EPS in GAMS: between two EPS records FIL2 is EPS
+                for cnt in range(f - z + 1, 0):
+                    fil[y + cnt] = my_f + (my_f - last) / (z - f) * cnt
+                    if both_eps:
+                        fil_eps.add(y + cnt)
+            have = True
+        if hold and z and done == z:
+            for y in eoh:
+                if y > z:
+                    fil[y] = my_f
+                    if my_f == 0.0:                     # the last record held is EPS
+                        fil_eps.add(y)
+        w = W.get(r, {})
+        for t in T:
+            yrs = [first] if t == T[0] else by_t.get(t, [])
+            tot, eps = 0.0, False
+            for ll in yrs:
+                wt = 1.0 if t == T[0] else w.get(str(ll), 0.0)
+                if not wt:
+                    continue
+                a = my.get(ll)
+                term = ((a or 0.0) + fil.get(ll, 0.0)) * wt
+                tot += term
+                eps = eps or (a is not None and a == 0.0 and not fil.get(ll, 0.0)) or ll in fil_eps
+            if tot or eps:
+                out.append((r, t, x, tot))
+    db.zap(name, "in_MILESTONYR(y)")
+    db.insert_rows(name, out)
+
+
 def coef_ext(db: DB):
     # ---- coef_ext.cli   (main_ext.mod: CLI before VDA and ABS)
     cli.coef_ext(db)
     # ---- coef_ext.vda
-    if str(db.env.get("WAVER", "")).upper() == "YES":
-        unsupported(db, "WAVER=YES (fillwave)")
+    # --- PARAMETER VDA_DISC(R,ALLYEAR);  $IFI NOT %WAVER%==YES $GOTO RESID
+    #     $BATINCLUDE fillwave PRC_RESID PRC 0;  $BATINCLUDE fillwave COM_PROJ COM 1;  OPTION CLEAR=VDA_DISC;
+    if waver(db):
+        disc = _vda_disc(db)
+        fillwave(db, "PRC_RESID", disc, False)
+        fillwave(db, "COM_PROJ", disc, True)
     # --- $BATINCLUDE eqlducs.vda (coef_ext.vda 78): start-up types and partial loads
     eqlducs_prep(db)
     # --- $IF DEFINED COM_CSTBAL $BATINCLUDE powerflo.vda CSTBAL (coef_ext.vda 80): costs on the components of a node balance
@@ -239,9 +337,17 @@ def coef_ext(db: DB):
     db.add("RPC_CONLY", """select k.r, k.y, k.p, k.c from RTPC k join t_u u on u.r=k.r and u.c=k.c where not in_RTC(k.r,k.y,k.c)""")
     # --- TOP_IRE('IMPEXP',C,TRACKC,P) = NO;
     db.remove("TOP_IRE", where="r='IMPEXP' and exists(select 1 from t_u u where u.r=TOP_IRE.r2 and u.c=TOP_IRE.c2)")
-    # --- UC_TIME with option -13 on year 0
-    if db.q1("select count(*) from UC_TIME where y='0' and round(value) = -13"):
-        unsupported(db, "UC_TIME option -13")
+    # --- Filter out UC constraints
+    #     IF(CARD(UC_TIME),OPTION R_UC<UC_TIME;
+    #       LOOP(R_UC(R,UCN)$(ROUND(UC_TIME(UCN,R,'0'))=-13),UC_ON(R_UC)=NO; IF(UC_R_SUM(R_UC),UC_ON(UC_R_SUM(REG,UCN))=NO));
+    #       UC_TIME(UCN,R,T)$((NOT UC_ON(R,UCN))$R_UC(R,UCN))=0; OPTION CLEAR=R_UC);
+    #     (option -13 on year 0 switches the constraint off in its region, and in every region of a regional sum)
+    if db.card("UC_TIME"):
+        db.tmp("t_m13", "select distinct r, uc from UC_TIME where y='0' and round(value) = -13")
+        db.remove("UC_ON", where="exists(select 1 from t_m13 m where m.r=UC_ON.r and m.uc=UC_ON.uc)")
+        db.remove("UC_ON", where="""exists(select 1 from t_m13 m join UC_R_SUM s on s.r=m.r and s.uc=m.uc where s.uc=UC_ON.uc)
+                                    and exists(select 1 from UC_R_SUM s where s.r=UC_ON.r and s.uc=UC_ON.uc)""")
+        db.zap("UC_TIME", "in_MILESTONYR(y) and not in_UC_ON(r,uc)")
     # --- RP_CGC(RPG_1ACE) = YES; OPTION TRACKPC < RPG_1ACE, RP_GRP < RP_CGC;
     #     TRACKPC(TRACKPC) = RPC_FFUNC(TRACKPC);                     (the single flows replaced by the activity: REDUCE YES)
     #     ACT_FLO(RTP(R,V,P),C,S)$(RPCS_VAR(R,P,C,S)$TRACKPC(R,P,C)) =

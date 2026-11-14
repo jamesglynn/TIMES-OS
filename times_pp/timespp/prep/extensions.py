@@ -7,6 +7,11 @@ from .common import rnd, require_empty as _need_empty, _values
 from . import abs as abs_ext, cli, dsc, dynamic_bounds, grids, mlf, resloadc, ucbet
 
 
+def waver(db: DB):
+    """$SET WAVER YES: residual capacities and demand projections taken as period averages (fillwave.gms)."""
+    return str(db.env.get("WAVER", "")).strip().strip("'\"").upper() == "YES"
+
+
 def drop_zero_series(db: DB, name, key_cols):
     """UNCD7(key,'0') $= (X(key,LL) NE 0);  X(key,DATAYEAR)$(NOT UNCD7(key,'0')) = 0;
     -> series whose values are all zero/EPS lose their DATAYEAR records."""
@@ -45,6 +50,9 @@ def init_ext(db: DB):
     s["MIYR_BOH"] = b1 - 1
     # --- PYR_S(LL) = YEARVAL(LL)=MIYR_BOH;
     db.assign("PYR_S", "select y from ALLYEAR where try_cast(y as INTEGER) = {MIYR_BOH}")
+    # --- $IFI %WAVER%==YES INT_DEFAULT('PASTI')=1;          (past investments on milestone years move to past years)
+    if waver(db):
+        db.add("INT_DEFAULT", "select 'PASTI' as u")
     # --- PRC_PKNO(R,P)$((NCAP_PKCNT(R,'0',P,'ANNUAL')>=10)$NCAP_PKCNT(R,'0',P,'ANNUAL')) = YES;  PRC_PKAF ... <= 0
     db.add("PRC_PKNO", "select r, p from NCAP_PKCNT where y='0' and s='ANNUAL' and value >= 10")
     db.add("PRC_PKAF", "select r, p from NCAP_PKCNT where y='0' and s='ANNUAL' and value <= 0")
@@ -293,13 +301,13 @@ def residual_capacity(db: DB):
             data.setdefault((r, p), []).append((int(y), EPS if v == 0 else v))
     tlife = {(r, p): v for r, p, v in db.q(f"select r, p, value from NCAP_TLIFE where y='{ll}'")}
     gt = s["G_TLIFE"]
-    out, opt0, ymax = [], [], []
-    waver = str(db.env.get("WAVER", "")).strip().strip("'\"").upper() == "YES"
+    out, opt0, ymax = [], [], {}
+    wave = waver(db)
     CNT = 0.0
     for r, p, o in track:
         dfunc = round(o)
         if dfunc:
-            ymax.append((r, p, float(dfunc)))
+            ymax[(r, p)] = float(dfunc)
         # PRC_RESID(R,'0',P) = MAX(1,NCAP_TLIFE(R,LL,P)+G_TLIFE$(NOT NCAP_TLIFE(R,LL,P)));
         life = max(1.0, tlife.get((r, p), 0.0) + (gt if (r, p) not in tlife else 0.0))
         opt0.append((r, "0", p, life))
@@ -330,8 +338,10 @@ def residual_capacity(db: DB):
             Z = CNT
         # $IFI %WAVER%==YES PRC_YMAX(R,P)=Z+1$(MY_F>0); IF(MY_F=0, PRC_RESID(R,LL+(Z-MIYR_BOH),P)=EPS);
         # the $IFI governs the whole line: without WAVER neither statement is compiled
-        if waver and abs(MY_F) < 1e-200:            # MY_F = 0 (numerically)
-            res[str(int(Z))] = EPS
+        if wave:
+            ymax[(r, p)] = Z + (1 if MY_F > 0 else 0)
+            if abs(MY_F) < 1e-200:                  # MY_F = 0 (numerically)
+                res[str(int(Z))] = EPS
         for y, v in res.items():
             out.append((r, y, p, v))
     import pandas as pd
@@ -344,7 +354,7 @@ def residual_capacity(db: DB):
     db.con.register("p_", df_put); db.put("PRC_RESID", "select * from p_ where in_ALLYEAR(y)", zero="eps"); db.con.unregister("p_")
     o = pd.DataFrame(opt0, columns=["r", "y", "p", "value"])
     db.con.register("o_", o); db.put("PRC_RESID", "select * from o_"); db.con.unregister("o_")
-    ym = pd.DataFrame(ymax, columns=["r", "p", "value"])
+    ym = pd.DataFrame([(r, p, v) for (r, p), v in ymax.items() if v != 0], columns=["r", "p", "value"])
     db.con.register("y_", ym); db.put("PRC_YMAX", "select * from y_"); db.con.unregister("y_")
     # --- NCAP_TLIFE(R,LL,P)$TRACKP(R,P) = 1;  NCAP_ILED(R,LL,P)$TRACKP(R,P) = 0;
     db.put("NCAP_TLIFE", f"select r, '{ll}' as y, p, 1 as value from PRC_RESID where y='0'")
