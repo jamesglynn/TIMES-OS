@@ -37,7 +37,7 @@ if get(ARGS, 1, "") == "--wait"
     endswith(ARGUMENTS, '\n') || exit(0)
     for kv in split(SETTINGS, '\t'; keepempty = false)
         k, v = split(kv, '='; limit = 2)
-        ENV[k] = v
+        ENV[String(k)] = String(v)      # Strings, not the SubStrings of the split
     end
     exit(TimesEq.RunCase.run_case(String.(split(chomp(ARGUMENTS), '\t')); t_script = time(), using_seconds = 0.0, early_seconds = EARLY))
 end

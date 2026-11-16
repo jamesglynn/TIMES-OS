@@ -7,6 +7,18 @@ result files; and, where TIMES in GAMS is at hand, compare the model with the on
     python TIMES.py check
     python TIMES.py run <run folder> [<run folder> ...] [--cases <list file>] [options]
     python TIMES.py verify <result folder> [...] [--keep] [--quiet]
+    python TIMES.py example <folder>
+    python TIMES.py clean [--yes]
+    python TIMES.py config [<run folder>]
+    python TIMES.py --version
+
+Installed with pip (pip install times-os) the program is times-os (or python -m times_os, which works also where the
+times-os command is not on the PATH), and its code is in Python's package folder, read only.  What setup makes
+(settings.json, the Julia packages and the compiled workload, a Julia it installs, the Segment Heap copy) is then in
+the data folder (Windows %LOCALAPPDATA%\\times-os, macOS ~/Library/Application Support/times-os, Linux
+~/.local/share/times-os; TIMES_DATA another), there is no .venv, and the first run (or check) makes the setup when it
+is not made yet, or was made for another version (after pip install -U times-os).  The GDX packages come with
+pip install "times-os[gdx]", gurobipy and scipy with "times-os[gurobi]".
 
 setup   creates .venv and installs the Python packages there, installs the Julia packages, finds Julia, writes
         settings.json, and runs the example model.  Run it once after cloning.  check and run use .venv when it is there.
@@ -71,9 +83,24 @@ The comparison with TIMES in GAMS (needs GAMS, its licence for the size of the m
 verify  the matrix comparison of --check on finished cases: a result folder of one case (<output>/<case>), or a folder
         of them (its summary.txt is updated).  The case needs its tables and work/ (kept by a run with --check until it
         has passed).  --keep: keep the tables after a passed check.
+example the example model DemoS_012 copied into a new or empty folder, and the line that runs it.
+clean   installed with pip: removes the data folder (it lists what is in it and asks first; --yes does not ask). Julia
+        and its own package store (~/.julia) are left.  Then pip uninstall times-os removes the package.
+--version  the version, the TIMES version followed, and Python's.
+config  every option of run with the value in force for a run of that folder (default: the current folder) and where it
+        comes from: the command line, a TIMES_<name> setting, a settings file, or the built-in default.
 
 options of run:
-    --out <folder>          where the results go (default: runs/ in this repository)
+    Their defaults may be set in a settings file, times-os.toml (TOML): the options' long names without the dashes as
+    keys, true/false for a switch, a list for a repeated option (out = "D:/results", threads = 8,
+    solver-option = ["lpmethod=4"]). Read: the nearest times-os.toml going up from the folder that holds the run
+    folder, then the user's own in the home folder; a key in the first wins. The command line wins over both, and
+    a TIMES_<name> setting over the files; a relative path in a file is taken from the file's folder. A run names
+    the files it read, at its start and in its report; an unknown key or a wrong value stops it before any work,
+    and so does cases (given on the command line only). TIMES_SETTINGS_FILES=0: no settings file is read.
+    --out <folder>          where the results go (default: runs/ in this repository; installed with pip: times-os-runs/<case>/
+                            in the folder that holds the run folder, one times-os-runs for several cases in the lowest
+                            folder that holds them all). The last line of a run: Output files available here: <folder>
     --check [inline]        compare the model with TIMES in GAMS entry by entry (see above).  inline: GAMS first, then
                             this implementation compares while it builds (one case at a time; for finding a difference)
     --gams reference|run|reuse|skip
@@ -111,7 +138,7 @@ options of run:
     --tolerance <number>    relative difference of the objectives that still counts as the same (default 1e-6)
     --points <folder>       where the results of earlier runs are (LPOINT, FIXBOH, TIMESED), when they are not where TIMES
                             looks: the result folder or the run folder of the earlier run; repeated as needed (TIMES_POINTS:
-                            folders separated by ;). The result folders of this runner (--out, runs\\) are looked in as well
+                            folders separated by ;). The result folders of this runner (--out, runs\\; installed: times-os-runs) are looked in as well
     --bundle                also write <case>_bundle.zip: the report, the logs, the run file, the DD files and the solver
                             options (no other file of the run folder); look through it before attaching it anywhere public
     --keep                  keep the tables and the converted GAMS solution (large) after the run
@@ -155,11 +182,19 @@ run (a result folder would be the run folder, overlap it, or replace a folder th
 """
 import sys, os, re, json, glob, time, shutil, hashlib, platform, subprocess, zipfile, datetime
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-SETTINGS = os.path.join(ROOT, "settings.json")
-JULIA_ENV = os.path.join(ROOT, ".julia_env")
-VENV = os.path.join(ROOT, ".venv")
-JULIA_BIN = os.path.join(ROOT, ".julia_bin")    # Julia as setup installs it, the last way it tries (a portable copy, no administrator rights)
+ROOT = os.path.dirname(os.path.abspath(__file__))   # the source root: the runner's code (read only)
+# The state root: what the runner makes for itself (settings.json, the Julia environment, the precompile workload, a
+# Julia it installs, setup's example run). In a checkout it is the checkout itself. Installed by pip (the package
+# times-os), the launcher says so (launched, below) and it is the data folder; nothing is then written under ROOT.
+STATE = ROOT
+PART = ROOT                                     # installed: the part of the data folder for this environment (launched)
+INSTALLED = None                               # installed by pip: {"version": the package's version}; None in a checkout
+DATA_MARKER = "times-os-data.txt"               # installed: marks the data folder as times-os's own (times_os/__main__.py)
+PROG = "python TIMES.py"                        # how the user starts this program, for the help and the messages (launched)
+SETTINGS = os.path.join(STATE, "settings.json")
+JULIA_ENV = os.path.join(STATE, ".julia_env")
+VENV = os.path.join(STATE, ".venv")
+JULIA_BIN = os.path.join(STATE, ".julia_bin")   # Julia as setup installs it, the last way it tries (a portable copy, no administrator rights)
 JULIA_VERSIONS = "https://julialang-s3.julialang.org/bin/versions.json"
 PORT_VERSION = "4.9.8"                         # the TIMES version this implementation follows
 TIMES_REPO = "https://github.com/etsap-TIMES/TIMES_model"
@@ -175,6 +210,59 @@ def setting(name, default=None):
     return default
 
 
+def launched(prog, version, state=None):
+    """Called by the launcher of the package times-os (times_os/__main__.py) before main: prog, the name the user
+    starts this program by (times-os, python -m times_os), for the help and the messages; state, when the package is
+    installed by pip, the data folder, which becomes the state root. Also for a clone installed with pip install -e .:
+    the clone's own code runs, as it is edited, and its state goes to the data folder, as for any installed package;
+    `python TIMES.py` in the same clone (no state given) keeps its state in the clone."""
+    global PROG, INSTALLED, STATE, PART, SETTINGS, JULIA_ENV, VENV, JULIA_BIN, SEGHEAP, WORKLOAD_DIR, WORKLOAD_TXT, WORKLOAD_JSON
+    PROG = prog
+    if not state:
+        return
+    INSTALLED = {"version": version}
+    STATE = os.path.abspath(state)
+    # shared by every environment: the marker, a Julia that setup installs, a fetched TIMES source, the setup lock (one
+    # setup at a time in the data folder). Each environment (a Python and a place of the code) has a part of its own:
+    # its settings, Julia environment, precompile workload and Segment Heap copy, so that the setup of one never
+    # rewrites what a run of another uses.
+    PART = os.path.join(STATE, part_name())
+    SETTINGS = os.path.join(PART, "settings.json")
+    JULIA_ENV = os.path.join(PART, ".julia_env")
+    VENV = os.path.join(PART, ".venv")             # never made when installed: the Python that runs times-os is used
+    JULIA_BIN = os.path.join(STATE, ".julia_bin")
+    SEGHEAP = os.path.join(PART, "segheap")
+    WORKLOAD_DIR = os.path.join(PART, "precompile")
+    WORKLOAD_TXT = os.path.join(WORKLOAD_DIR, "WORKLOAD.txt")
+    WORKLOAD_JSON = os.path.join(WORKLOAD_DIR, "model.json")
+    # the programs this one starts look there too: TimesEq for its precompile workload (src/TimesEq.jl), the
+    # preprocessor for its Julia kernels (timespp/kernels.py) and the calibration of MACRO MLF (timespp/prep/mlf.py)
+    os.environ["TIMESEQ_WORKLOAD"] = WORKLOAD_DIR
+    os.environ["TIMESPP_KERNELS_PROJECT"] = JULIA_ENV
+    bindir = settings().get("julia_bindir")
+    if bindir and not os.environ.get("TIMESPP_JULIA_BINDIR"):
+        os.environ["TIMESPP_JULIA_BINDIR"] = bindir
+
+
+def default_out():
+    """Where the results go without --out: runs/ in this repository; installed by pip, times-os-runs beside the run
+    folders of this run (installed_out, set by run)."""
+    return (RUN_DEFAULT or os.path.join(os.getcwd(), RESULTS_NAME)) if INSTALLED else os.path.join(STATE, "runs")
+
+
+def setup_key():
+    """What the setup of an installed package was made for: its version, the place of its code and the Python that runs
+    it. Another key (a pip upgrade, another environment) means the setup is made again before the next run."""
+    return {"version": INSTALLED["version"], "tree": ROOT, "python": os.path.normcase(os.path.abspath(sys.prefix))}
+
+
+def part_name():
+    """Installed: the name of this environment's part of the data folder: env- and a short hash of the Python that runs
+    times-os and the place of its code (not the version: an upgrade brings the same part up to date)."""
+    key = os.path.normcase(os.path.abspath(sys.prefix)) + "\n" + os.path.normcase(ROOT)
+    return "env-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:10]
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # small helpers
 def venv_python():
@@ -182,7 +270,7 @@ def venv_python():
     return os.path.join(VENV, "Scripts", "python.exe") if WIN else os.path.join(VENV, "bin", "python")
 
 
-SEGHEAP = os.path.join(VENV, "segheap")        # Windows: the interpreter copy on the Segment Heap, made by setup
+SEGHEAP = os.path.join(VENV, "segheap")        # Windows: the interpreter copy on the Segment Heap, made by setup (installed: in the data folder)
 
 
 def winheap():
@@ -195,7 +283,11 @@ def winheap():
 
 
 def base_python():
-    """The interpreter .venv was made from (home in its pyvenv.cfg), else sys._base_executable."""
+    """The interpreter .venv was made from (home in its pyvenv.cfg), else sys._base_executable. Installed: the
+    interpreter the running Python was made from (itself when it is not a virtual environment)."""
+    if INSTALLED:
+        b = getattr(sys, "_base_executable", None) or sys.executable
+        return b if os.path.isfile(b) else None
     cfg = os.path.join(VENV, "pyvenv.cfg")
     m = re.search(r"(?m)^\s*home\s*=\s*(.+?)\s*$", read(cfg)) if os.path.isfile(cfg) else None
     if m and os.path.isfile(os.path.join(m.group(1), "python.exe")):
@@ -249,14 +341,23 @@ def make_segheap():
         os.makedirs(sp)
         # .venv's packages (its .pth files too), found from the copy's own place; and sys._base_executable: without it
         # multiprocessing starts the DD reader's workers in the base interpreter, on the NT heap (bpo-35797)
-        write(os.path.join(sp, "times_segheap.pth"), "import os, site, sys; site.addsitedir(os.path.join(os.path.dirname(sys.prefix), 'Lib', 'site-packages')); "
-                                                    "sys._base_executable = sys.executable\n")
+        if INSTALLED:   # installed by pip: the packages of the Python that runs times-os (a venv's, or the user's own)
+            import site
+            dirs = [d for d in site.getsitepackages() + ([site.getusersitepackages()] if site.ENABLE_USER_SITE else []) if os.path.isdir(d)]
+            write(os.path.join(sp, "times_segheap.pth"), "import site, sys; " + "".join(f"site.addsitedir({d!r}); " for d in dirs)
+                  + "sys._base_executable = sys.executable\n")
+        else:
+            write(os.path.join(sp, "times_segheap.pth"), "import os, site, sys; site.addsitedir(os.path.join(os.path.dirname(sys.prefix), 'Lib', 'site-packages')); "
+                                                        "sys._base_executable = sys.executable\n")
         code, out, _ = call([exe, os.path.join(ROOT, "times_pp", "timespp", "winheap.py"), "selftest"], timeout=600)
         try:
             got = json.loads(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
             raise RuntimeError(f"the copy did not run (exit {code}): " + (out.strip()[-500:] or "no output"))
         same = lambda a, b: bool(a and b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+        if INSTALLED:   # a packaged Python's AppData is its package's (...\Packages\<app>\LocalCache\Local\...): the same copy
+            unpack = lambda a: a and re.sub(r"(?i)\\Packages\\[^\\]+\\LocalCache\\Local\\", r"\\", a, count=1)
+            same = lambda a, b, _same=same: _same(unpack(a), unpack(b))
         why = [w for w, bad in (("the copy is not on the Segment Heap", got.get("heap") != "segment"),
                                 ("DuckDB does not import in the copy: " + got.get("duckdb_error", ""), "duckdb" not in got),
                                 ("its worker processes are not on the Segment Heap: " + str(got.get("worker_error") or got.get("worker_heap")), got.get("worker_heap") != "segment"),
@@ -282,16 +383,16 @@ def pp_python():
     h = settings().get("segment_heap") or {}
     exe = locate(h.get("python"))
     if not h:
-        return sys.executable, "NT heap: no Segment Heap copy (python TIMES.py setup makes it)"
+        return sys.executable, f"NT heap: no Segment Heap copy ({PROG} setup makes it)"
     if h.get("status") == "off":
-        return sys.executable, f"NT heap: the Segment Heap copy is switched off ({h.get('why')}; python TIMES.py setup makes it)"
+        return sys.executable, f"NT heap: the Segment Heap copy is switched off ({h.get('why')}; {PROG} setup makes it)"
     if h.get("status") != "ok":
         return sys.executable, f"NT heap: the Segment Heap copy could not be made at setup ({h.get('why')})"
     if not exe or not os.path.isfile(exe):
-        return sys.executable, "NT heap: the Segment Heap copy is missing (python TIMES.py setup makes it again)"
+        return sys.executable, f"NT heap: the Segment Heap copy is missing ({PROG} setup makes it again)"
     if h.get("version") != platform.python_version():
         return sys.executable, (f"NT heap: Python changed from {h.get('version')} to {platform.python_version()} since the Segment Heap copy was made "
-                                "(python TIMES.py setup makes it again)")
+                                f"({PROG} setup makes it again)")
     return exe, "Segment Heap"
 
 
@@ -405,6 +506,7 @@ def call(cmd, cwd=None, log=None, timeout=None, env=None, echo=None, follow=None
                 for raw in p.stdout:
                     line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     f.write(line + "\n")
+                    f.flush()                            # the file as the program goes (a sign of life reads it)
                     if VERBOSE and echo is not None:
                         print(echo + line, flush=True)
             code = p.wait()
@@ -469,15 +571,15 @@ def locate(path):
     if not path:
         return None
     if not os.path.isabs(path):
-        path = os.path.join(ROOT, path)
+        path = os.path.join(STATE, path)
     return os.path.abspath(path)
 
 
 def for_settings(path):
-    """Path as stored in settings.json. Inside this repository it is relative to the repository."""
+    """Path as stored in settings.json. Inside this repository (installed: the data folder) it is relative to it."""
     path = os.path.abspath(path)
     try:
-        rel = os.path.relpath(path, ROOT)
+        rel = os.path.relpath(path, STATE)
     except ValueError:                                          # another drive: a relative path cannot name it
         return path
     if rel == os.pardir or rel.startswith(os.pardir + os.sep):
@@ -487,7 +589,11 @@ def for_settings(path):
 
 def pin_timeseq_path():
     """The TimesEq source in .julia_env is ../times_eq (TimesPPKernels ../times_pp/jlkernels, the add-on of stochastic
-    TIMES ../times_eq/addons/TimesEqStochastic), so the checkout can be moved."""
+    TIMES ../times_eq/addons/TimesEqStochastic), so the checkout can be moved. Installed, the environment in the data
+    folder keeps the absolute paths Julia wrote, to the code in the package folder (setup is made again when that
+    place changes)."""
+    if INSTALLED:
+        return
     for name in ("Project.toml", "Manifest.toml"):
         path = os.path.join(JULIA_ENV, name)
         if not os.path.isfile(path):
@@ -514,7 +620,55 @@ def sha(path):
 
 # ----------------------------------------------------------------------------------------------------------------
 # finding the programs
-def find_julia(given=None):
+JULIA_OLD = []          # find_julia(check=True): the Julias found that are older than 1.11, as (executable, its --version)
+
+
+def julia_too_old(exe):
+    """-> the --version line of the Julia at `exe` if it runs and is older than 1.11, else None."""
+    try:
+        code, out, _ = call([exe, "--version"], timeout=1800)
+    except Exception:
+        return None
+    m = re.search(r"julia version (\d+)\.(\d+)\.(\d+)", out or "")
+    return m.group(0) if code == 0 and m and (int(m.group(1)), int(m.group(2))) < (1, 11) else None
+
+
+def julia_version_of(exe):
+    """-> the version ("1.13.1") of the Julia at `exe`, or None. Asked once and kept in settings.json beside the Julia it
+    belongs to (julia_version: {julia, version}); asked again only for another Julia."""
+    s = settings()
+    kept = s.get("julia_version") or {}
+    if kept.get("julia") == for_settings(exe) and kept.get("version"):
+        return kept["version"]
+    try:
+        code, out, _ = call([exe, "--version"], timeout=1800)
+    except Exception:
+        return None
+    m = re.search(r"julia version (\d+\.\d+\.\d+\S*)", out or "")
+    if code or not m:
+        return None
+    s["julia_version"] = {"julia": for_settings(exe), "version": m.group(1)}
+    try:
+        write(SETTINGS, json.dumps(s, indent=1))
+    except OSError:
+        pass
+    return m.group(1)
+
+
+def old_julia_notice(julia):
+    """At the start of a run: a line when the Julia in use is older than 1.11 (one set up before setup refused it).
+    The run goes on."""
+    v = julia_version_of(julia) if julia else None
+    if v and tuple(int(x) for x in v.split(".")[:2]) < (1, 11):
+        print(f"note: the Julia in use is {v} ({julia}); times-os needs Julia 1.11 or newer. Run {PROG} setup: it takes a "
+              f"newer Julia, or installs one beside this one. This run goes on with Julia {v}.", flush=True)
+
+
+def find_julia(given=None, check=False):
+    """The Julia to use: the one given, the one saved by setup, the one on the PATH, then juliaup's, the Microsoft
+    Store's, a portable copy in .julia_bin and the usual install folders.  check: a Julia older than 1.11 is passed by
+    (and kept in JULIA_OLD), so that the next one, or an install, is taken."""
+    JULIA_OLD.clear()
     cands = [given, locate(settings().get("julia")), shutil.which("julia")]
     home = os.path.expanduser("~")
     cands += [os.path.join(home, ".juliaup", "bin", "julia.exe" if WIN else "julia")]
@@ -526,10 +680,36 @@ def find_julia(given=None):
         for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles", "")):
             cands += sorted(glob.glob(os.path.join(base, "Programs", "Julia*", "bin", "julia.exe")), reverse=True)
             cands += sorted(glob.glob(os.path.join(base, "Julia*", "bin", "julia.exe")), reverse=True)
+    seen = set()
     for c in cands:
-        if c and os.path.isfile(c):
-            return os.path.abspath(c)
+        if c and os.path.isfile(c) and os.path.normcase(os.path.abspath(c)) not in seen:
+            seen.add(os.path.normcase(os.path.abspath(c)))
+            if check:
+                old = julia_too_old(c)
+                if old:
+                    JULIA_OLD.append((os.path.abspath(c), old))
+                    continue
+            return real_julia(os.path.abspath(c))
     return None
+
+
+def real_julia(julia):
+    """Installed by pip, on Windows: the julia.exe that an app alias (WindowsApps, the Microsoft Store's juliaup)
+    stands for. The alias starts Julia as a packaged app of its own, which sees AppData without the files that a
+    packaged Python (the Microsoft Store's, or one started from a packaged app) wrote there: the data folder's model
+    files and workload. Julia itself, started from this process, sees what this process sees."""
+    if not (INSTALLED and WIN and os.path.basename(os.path.dirname(julia)).lower() == "windowsapps"):
+        return julia
+    bindir = settings().get("julia_bindir")
+    exe = os.path.join(bindir, "julia.exe") if bindir else ""
+    if not os.path.isfile(exe):
+        try:
+            out = subprocess.run([julia, "--startup-file=no", "-e", "print(Sys.BINDIR)"], capture_output=True,
+                                 text=True, timeout=600).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        exe = os.path.join(out.splitlines()[-1], "julia.exe") if out else ""
+    return exe if os.path.isfile(exe) else julia
 
 
 def gams_for_lp(given=None):
@@ -661,7 +841,7 @@ def install_julia(only=None):
 def install_julia_portable():
     """The latest stable Julia (1.11 or newer) from julialang.org, unpacked into .julia_bin. -> (exe, version) or (None, why)"""
     import urllib.request, tarfile
-    osname, ext = ("winnt", "zip") if WIN else ("linux", "tar.gz") if sys.platform.startswith("linux") else (None, None)
+    osname, ext = ("winnt", "zip") if WIN else ("linux", "tar.gz") if sys.platform.startswith("linux") else ("mac", "tar.gz") if sys.platform == "darwin" else (None, None)
     arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(platform.machine().lower())
     if not osname or not arch:
         return None, f"no portable copy for this platform ({sys.platform}, {platform.machine()})"
@@ -746,8 +926,8 @@ def find_times(given=None, any_saved=True):
     saved = settings().get("times")
     if not any_saved and not (saved and times_version(locate(saved)) == PORT_VERSION):
         saved = None
-    cands = [given, locate(saved), os.path.join(ROOT, "TIMES_model-v" + PORT_VERSION), os.path.join(ROOT, "TIMES_model")]
-    for base in (os.path.dirname(ROOT), r"C:\Veda\Veda" if WIN else None, r"C:\VEDA\Veda" if WIN else None):
+    cands = [given, locate(saved), os.path.join(STATE, "TIMES_model-v" + PORT_VERSION), os.path.join(STATE, "TIMES_model")]
+    for base in (os.path.dirname(STATE), r"C:\Veda\Veda" if WIN else None, r"C:\VEDA\Veda" if WIN else None):
         if base and os.path.isdir(base):
             cands += sorted(glob.glob(os.path.join(base, "GAMS_SrcTIMES*")), key=lambda d: (times_version(d) != PORT_VERSION, d))
             cands += glob.glob(os.path.join(base, "TIMES_model")) + glob.glob(os.path.join(base, "TIMES_model-v*"))
@@ -773,6 +953,8 @@ def declarations_differ(src):
 
 def revision():
     """The revision of this code, when git is there to tell."""
+    if INSTALLED:
+        return f"times-os {INSTALLED['version']}, installed by pip ({ROOT})"
     code, out, _ = call(["git", "-C", ROOT, "--no-optional-locks", "rev-parse", "--short", "HEAD"])
     if code != 0:
         return "unknown (not a git checkout, or git not installed)"
@@ -780,9 +962,61 @@ def revision():
     return out.strip() + (" + local changes" if code2 == 0 and dirty.strip() else "")
 
 
+DUCKDB_REQUIREMENT = "duckdb<2"   # requirements.txt's line and pyproject.toml's dependency (a test holds the three equal)
+
+
+def version_tuple(v):
+    """'1.5.6' -> (1, 5, 6); the leading numbers of a version, without its tags (dev, rc, +local)."""
+    m = re.match(r"\d+(?:\.\d+)*", v or "")
+    return tuple(int(x) for x in m.group(0).split(".")) if m else ()
+
+
+def duckdb_version(exe):
+    """The version of DuckDB installed for the Python `exe` (read from its package metadata, DuckDB is not loaded), or
+    None when it has none."""
+    import importlib.metadata as md
+    if os.path.normcase(os.path.abspath(exe)) != os.path.normcase(os.path.abspath(sys.executable)):
+        code = ("import importlib.metadata as m\ntry:\n    print(m.version('duckdb'))\n"
+                "except m.PackageNotFoundError:\n    print('-')")
+        try:
+            out = subprocess.run([exe, "-c", code], capture_output=True, text=True, timeout=120).stdout.strip()
+            if out:
+                return None if out == "-" else out.splitlines()[-1]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        return md.version("duckdb")
+    except md.PackageNotFoundError:
+        return None
+
+
+def duckdb_problem():
+    """-> (the version of DuckDB in the Python that runs the preprocessor or None, its executable, what is wrong with
+    it or None). The bound is DUCKDB_REQUIREMENT's."""
+    exe = pp_python()[0]
+    v = duckdb_version(exe)
+    bound = DUCKDB_REQUIREMENT.split("<", 1)[1]
+    fix = (f"pip install --force-reinstall times-os (or: \"{exe}\" -m pip install \"{DUCKDB_REQUIREMENT}\")" if INSTALLED
+           else f"{PROG} setup")
+    if v is None:
+        return None, exe, f"DuckDB is not installed in the Python that runs the preprocessor ({exe}); TIMES-OS needs {DUCKDB_REQUIREMENT}  -> {fix}"
+    if version_tuple(v) >= version_tuple(bound):
+        return v, exe, f"DuckDB {v} is in the Python that runs the preprocessor ({exe}); TIMES-OS needs {DUCKDB_REQUIREMENT}  -> {fix}"
+    return v, exe, None
+
+
+def never_set_up():
+    """A checkout with no setup at all: no .venv, no .julia_env and no setup recorded in settings.json. Not for a
+    setup however old (its own messages say what to do), and never installed (the first run sets itself up)."""
+    if INSTALLED or os.path.isfile(venv_python()) or os.path.isdir(JULIA_ENV):
+        return False
+    s = settings()
+    return not any(k in s for k in ("setup", "julia", "segment_heap"))
+
+
 def python_packages():
     found, missing = {}, []
-    for mod, pip in (("duckdb", "duckdb<2"), ("pandas", "pandas"), ("numpy", "numpy"), ("gams.transfer", "gamsapi[transfer]"), ("gamspy_base", "gamspy_base")):
+    for mod, pip in (("duckdb", DUCKDB_REQUIREMENT), ("pandas", "pandas"), ("numpy", "numpy"), ("gams.transfer", "gamsapi[transfer]"), ("gamspy_base", "gamspy_base")):
         try:
             m = __import__(mod, fromlist=["x"])
             found[mod] = getattr(m, "__version__", "installed")
@@ -865,6 +1099,32 @@ def julia_ready(julia):
     return ok, ("" if ok else julia_error(out)) or (out.strip().splitlines()[-1] if out.strip() else "no output")
 
 
+def julia_packages_installed():
+    """TimesEq, JuMP and HiGHS are in the Manifest of .julia_env (installed, compiled or not)."""
+    man = os.path.join(JULIA_ENV, "Manifest.toml")
+    text = read(man) if os.path.isfile(man) else ""
+    return all(re.search(rf"(?m)^\[\[deps\.{name}\]\]", text) for name in ("TimesEq", "JuMP", "HiGHS"))
+
+
+def julia_step_ok(code, installed):
+    """setup's Julia packages step has done its work: finished (exit 0), or stopped at its time limit (exit None)
+    with TimesEq, JuMP and HiGHS installed. Then what follows it is done too: the paths pinned and where Julia's
+    libraries are (julia_bindir, for the preprocessor's Julia kernels)."""
+    return code == 0 or (code is None and installed)
+
+
+def julia_step_line(code, out, installed):
+    """The line of setup's Julia packages step. code: its exit status, None when the step was stopped at its time
+    limit. Stopped with the packages installed, the step has not failed: what is left of their compiling is done by
+    the first run that needs it."""
+    if code == 0:
+        return "done"
+    if julia_step_ok(code, installed):
+        return ("stopped after 2 hours, with the packages installed: what is left of their compiling is done when "
+                "a run needs it")
+    return "FAILED:\n" + (out or "")[-3000:]
+
+
 def julia_error(out):
     """The part of a Julia output that says what failed: from the first ERROR line, at most 25 lines."""
     lines = out.strip().splitlines()
@@ -883,7 +1143,10 @@ def check(verbose=True):
     need = [m for m in missing if m[0] in ("duckdb", "pandas", "numpy")]
     chain &= not need
     lines.append(("ok" if not need else "MISSING", "Python packages (preprocessor)", ", ".join(f"{k} {v}" for k, v in found.items() if k in ("duckdb", "pandas", "numpy"))
-                  + ("  -> missing: " + ", ".join(m[1] for m in need) + "; run: python TIMES.py setup" if need else "")))
+                  + ("  -> missing: " + ", ".join(m[1] for m in need) + f"; run: {PROG} setup" if need else "")))
+    dv, dexe, dwrong = duckdb_problem()
+    chain &= not dwrong
+    lines.append(("MISSING" if dwrong else "ok", "DuckDB (the preprocessor's)", dwrong or f"{dv} ({dexe}): {DUCKDB_REQUIREMENT} is needed"))
     seg = True
     if WIN:
         exe, heap = pp_python()
@@ -898,7 +1161,8 @@ def check(verbose=True):
     gdx_err = gdx_library() if "gams.transfer" in found else ""
     gdx = "gams.transfer" in found and not gdx_err
     gdx_why = (f"  -> the GDX library does not load: {gdx_err}" if gdx_err else
-               "not installed: needed only for the comparison with TIMES in GAMS, --lp and --jacobian  -> run: python TIMES.py setup --gdx")
+               f"not installed: needed only for the comparison with TIMES in GAMS, --lp and --jacobian  -> "
+               + ("pip install \"times-os[gdx]\"" if INSTALLED else f"run: {PROG} setup --gdx"))
     lines.append(("ok" if gdx else "NOTE", "Python packages (GDX: the comparison with GAMS, --lp, --jacobian)", ", ".join(f"{k} {v}" for k, v in found.items() if k in ("gams.transfer", "gamspy_base"))
                   + ("" if gdx else gdx_why)
                   + ("" if "gamspy_base" in found or not gdx else "  (gamspy_base not installed: the GDX library of the GAMS installation is used)")))
@@ -906,17 +1170,20 @@ def check(verbose=True):
     if julia:
         _, out, _ = call([julia, "--version"], timeout=120)
         ready, why = julia_ready(julia)
-        chain &= ready
-        lines.append(("ok", "Julia", f"{out.strip()} ({julia})"))
-        lines.append(("ok" if ready else "MISSING", "Julia packages (TimesEq, JuMP, HiGHS)", "installed in .julia_env" if ready else f"{why}  -> run: python TIMES.py setup"))
+        m = re.search(r"julia version (\d+)\.(\d+)", out or "")
+        old = bool(m) and (int(m.group(1)), int(m.group(2))) < (1, 11)
+        chain &= ready and not old
+        lines.append(("MISSING", "Julia",f"{out.strip()} ({julia}): times-os needs Julia 1.11 or newer  -> run: {PROG} setup "
+                      "(it takes a newer Julia, or installs one beside this one)") if old else ("ok", "Julia", f"{out.strip()} ({julia})"))
+        lines.append(("ok" if ready else "MISSING", "Julia packages (TimesEq, JuMP, HiGHS)", "installed in .julia_env" if ready else f"{why}  -> run: {PROG} setup"))
         man = os.path.join(JULIA_ENV, "Manifest.toml")
         kern = os.path.isfile(man) and "TimesPPKernels" in read(man) and bool(s.get("julia_bindir"))
         lines.append(("ok" if kern else "NOTE", "Julia kernels of the preprocessor", "TimesPPKernels in .julia_env (on by default; TIMESPP_KERNELS=none turns them off)"
-                      if kern else "not installed: the preprocessor runs without them  -> run: python TIMES.py setup"))
+                      if kern else f"not installed: the preprocessor runs without them  -> run: {PROG} setup"))
         # Ipopt: the calibration of TIMES-MACRO MLF (times_eq/tools/mlf_calibrate.jl); every other run goes without it
         ipopt = os.path.isfile(man) and re.search(r'(?m)^\[\[deps\.Ipopt\]\]', read(man)) is not None
         lines.append(("ok" if ipopt else "NOTE", "Ipopt (the calibration of TIMES-MACRO MLF)", "installed in .julia_env" if ipopt
-                      else "not installed: a run with MACRO MLF cannot calibrate  -> run: python TIMES.py setup"))
+                      else f"not installed: a run with MACRO MLF cannot calibrate  -> run: {PROG} setup"))
         # stochastic TIMES: its equations compiled ahead are an add-on, compiled by setup or by the first such run
         if ready and stochastic_installed():
             julia_compiled(julia)
@@ -924,17 +1191,17 @@ def check(verbose=True):
                      if ready and stochastic_installed() and STOCH["compiled"] else
                      ("NOTE", "Stochastic TIMES (STAGES, SPINES): its add-on",
                       ("installed, not compiled" if ready and stochastic_installed() else "not installed")
-                      + ": the first run with STAGES or SPINES compiles it (a few minutes, once); python TIMES.py setup does it now"))
+                      + f": the first run with STAGES or SPINES compiles it (a few minutes, once); {PROG} setup does it now"))
     else:
         chain = False
-        lines.append(("MISSING", "Julia", "not found  -> run: python TIMES.py setup   (it installs Julia: winget's Juliaup, the Microsoft Store's "
+        lines.append(("MISSING", "Julia", f"not found  -> run: {PROG} setup   (it installs Julia: winget's Juliaup, the Microsoft Store's "
                       "Julia, or a portable copy into .julia_bin; or give the place of your own: setup --julia <julia executable>)"))
     src = find_times()
     if src:
         v = times_version(src)
         lines.append(("ok" if v == PORT_VERSION else "NOTE", "TIMES source", f"v{v} ({src})" + ("" if v == PORT_VERSION else f"  -> this implementation follows v{PORT_VERSION}; results can differ with another version")))
     else:   # the open chain carries the TIMES declarations it reads (times_pp/timespp/times_src): the source is for GAMS only
-        lines.append(("NOTE", "TIMES source", f"not found  -> needed only to run GAMS for the comparison: git clone --branch v{PORT_VERSION} --depth 1 {TIMES_REPO} \"{os.path.join(ROOT, 'TIMES_model-v' + PORT_VERSION)}\"   "
+        lines.append(("NOTE", "TIMES source", f"not found  -> needed only to run GAMS for the comparison: git clone --branch v{PORT_VERSION} --depth 1 {TIMES_REPO} \"{os.path.join(STATE, 'TIMES_model-v' + PORT_VERSION)}\"   "
                       "(or give its place: setup --times <folder with initsys.mod>)"))
     gams = find_gams()
     gams_ok = bool(gams) and gdx
@@ -950,18 +1217,35 @@ def check(verbose=True):
         lines.append(("NOTE", "GAMS for --lp <solver>", "not found: needed only to solve with a solver of your GAMS (HiGHS, the default, needs nothing)"))
     g_ver, g_home = find_gurobi()
     have, sci = package_version("gurobipy"), package_version("scipy")
-    if have and sci:
+    if INSTALLED and not (have and sci and (not g_ver or g_ver == have)):   # installed by pip: the package's extra brings them
+        lines.append(("NOTE", "Python packages (--gurobi)", (f"gurobipy {have}, scipy {sci}" if have and sci else "gurobipy and scipy not installed")
+                      + f": needed only for --gurobi  -> pip install \"times-os[gurobi]\" gurobipy=={g_ver or '<the version of your Gurobi licence>'}"))
+    elif have and sci:
         lines.append(("ok" if not g_ver or g_ver == have else "NOTE", "Python packages (--gurobi)", f"gurobipy {have}, scipy {sci}"
-                      + (f"  -> Gurobi {g_ver} is installed ({g_home}): run: python TIMES.py setup (it installs gurobipy {g_ver})" if g_ver and g_ver != have else "")))
+                      + (f"  -> Gurobi {g_ver} is installed ({g_home}): run: {PROG} setup (it installs gurobipy {g_ver})" if g_ver and g_ver != have else "")))
     else:
         lines.append(("NOTE", "Python packages (--gurobi)", "gurobipy and scipy not installed: needed only for --gurobi  -> "
-                      + (f"run: python TIMES.py setup (it installs gurobipy {g_ver}, for Gurobi {g_ver} in {g_home})" if g_ver else
-                         "no Gurobi found here; run: python TIMES.py setup --gurobi <the version of your Gurobi licence>")))
+                      + (f"run: {PROG} setup (it installs gurobipy {g_ver}, for Gurobi {g_ver} in {g_home})" if g_ver else
+                         f"no Gurobi found here; run: {PROG} setup --gurobi <the version of your Gurobi licence>")))
     lines.append(("ok", "This code", revision()))
+    if INSTALLED:   # installed by pip: where its code and its data folder are, and whether the setup is for this version
+        rec, key = s.get("installed") or {}, setup_key()
+        cur = all(rec.get(k) == v for k, v in key.items())
+        lines.append(("ok", "Code (read only)", ROOT))
+        others = [n for n in os.listdir(STATE) if n.startswith("env-") and n != os.path.basename(PART)] if os.path.isdir(STATE) else []
+        lines.append(("ok", "Data folder", f"{STATE}  ({PROG} clean removes it, with every part)"))
+        lines.append(("ok", "Its part for this environment", f"{os.path.basename(PART)}  (this Python and this place of the code: "
+                      "settings, Julia packages, compiled workload)" + (f"; {len(others)} other part{'s' if len(others) > 1 else ''}"
+                      " for other environments" if others else "")))
+        lines.append(("ok" if cur else "MISSING", "Setup", f"finished {rec.get('finished')} for times-os {rec.get('version')}" if cur else
+                      (f"made for times-os {rec.get('version')}, this is {key['version']}" if rec else "not made yet")
+                      + f"  -> the next {PROG} run makes it (or: {PROG} setup)"))
     if verbose:
         for st, what, text in lines:
             print(f"  {st:8}{what:46}{text}")
         print()
+        if INSTALLED:
+            print(f"  {BETA}\n")
         print("  The open chain (DD files -> Python -> Julia -> HiGHS) " + ("is ready." if chain else "is NOT ready: see MISSING above."))
         print("  The comparison with GAMS " + ("is ready." if chain and gams_ok else "is NOT ready." if chain else "needs the chain first."))
     return chain, chain and gams_ok, lines
@@ -1027,7 +1311,7 @@ MILESTONE_RE = re.compile(r"(?ims)^(\s*SET\s+MILESTONYR\s*/)([^/]*)(/\s*;?)")   
 
 
 
-WORKLOAD_DIR = os.path.join(ROOT, "times_eq", "precompile")
+WORKLOAD_DIR = os.path.join(ROOT, "times_eq", "precompile")     # installed: <the part of the data folder>/precompile (launched; TimesEq reads TIMESEQ_WORKLOAD)
 WORKLOAD_TXT = os.path.join(WORKLOAD_DIR, "WORKLOAD.txt")
 WORKLOAD_JSON = os.path.join(WORKLOAD_DIR, "model.json")
 TIMESEQ_UUID = "cb114957-84c0-488e-862f-6e374d3cba32"
@@ -1100,6 +1384,7 @@ def write_workload(src, mode="full"):
         for f in os.listdir(model):
             if os.path.isfile(os.path.join(model, f)):
                 shutil.copy2(os.path.join(model, f), os.path.join(tmp, f))
+        writable(tmp)
         run_file = os.path.join(tmp, "demos_012.run")
         write(run_file, reduce_no(read(run_file)))
         new = os.path.join(tmp, "model.db3")
@@ -1113,7 +1398,7 @@ def write_workload(src, mode="full"):
         return False
     write(WORKLOAD_JSON, json.dumps({"preprocessor": pp_fingerprint(), "tables": tables_fingerprint(db)}, indent=1))
     changed = write_workload_txt("full", tables_fingerprint(db))
-    print(f"   the tables of models/DemoS_012 for the precompile workload: {os.path.relpath(db, ROOT)}  ({t:.0f} s)"
+    print(f"   the tables of models/DemoS_012 for the precompile workload: {os.path.relpath(db, STATE)}  ({t:.0f} s)"
           + ("" if changed else "; table layout unchanged"))
     return True
 
@@ -1220,17 +1505,28 @@ def compile_notice(julia):
 
 def example_copy():
     """models/DemoS_012 in runs/_setup_test/input: a run writes results into its run folder, and models/ stays as it is."""
-    copy = os.path.join(ROOT, "runs", "_setup_test", "input", "DemoS_012")
+    copy = os.path.join(PART, "runs", "_setup_test", "input", "DemoS_012")
     shutil.rmtree(copy, ignore_errors=True)
     shutil.copytree(os.path.join(ROOT, "models", "DemoS_012"), copy)
+    writable(copy)
     return copy
+
+
+def writable(folder):
+    """Installed by pip: the files copied from the package (which may be read-only) made writable, as files of the
+    user's own."""
+    if INSTALLED:
+        for d, dirs, files in os.walk(folder):
+            for f in dirs + files:
+                p = os.path.join(d, f)
+                os.chmod(p, os.stat(p).st_mode | 0o200)
 
 
 def fetch_times_source(found=None):
     """The TIMES source of the version this implementation follows, from IEA-ETSAP's repository (TIMES_REPO) into
     TIMES_model-v<version> in this folder: with git when it is installed, else the tag's zip file.  The folder, or None;
     a folder of that name that is not that source is left as it is."""
-    dest = os.path.join(ROOT, "TIMES_model-v" + PORT_VERSION)
+    dest = os.path.join(STATE, "TIMES_model-v" + PORT_VERSION)
     if os.path.exists(dest):
         print(f"   {dest} is there and is not the TIMES source v{PORT_VERSION}: left as it is (give the source with --times <folder>)")
         return None
@@ -1262,7 +1558,7 @@ def fetch_times_source(found=None):
 
 def setup(args):
     opt = lambda name: args[args.index(name) + 1] if name in args else None
-    if "--skip-install" not in args and not os.path.isfile(venv_python()):
+    if "--skip-install" not in args and not INSTALLED and not os.path.isfile(venv_python()):
         if sys.version_info < (3, 11):
             print(f"Python 3.11 or newer is needed to create .venv ({platform.python_version()} at {sys.executable}).")
             return 1
@@ -1277,7 +1573,17 @@ def setup(args):
         return forwarded
     s = settings()
     print("TIMES-OS setup\n")
-    if "--skip-install" not in args:
+    if INSTALLED and "--skip-install" not in args:
+        # installed by pip: pip has installed the packages of the open chain; the others come with the package's extras
+        print(f"1. Python packages: installed with times-os by pip ({sys.executable})")
+        found, _ = python_packages()
+        if find_gams(opt("--gams")) or "--gdx" in args:
+            print("   the GDX packages (for the comparison with TIMES in GAMS, --lp and --jacobian): " + ("installed" if "gams.transfer" in found else
+                  f"not installed; they come with:  \"{sys.executable}\" -m pip install \"times-os[gdx]\""))
+        g_ver = opt("--gurobi") or find_gurobi()[0]
+        if g_ver and not (package_version("gurobipy") == g_ver and package_version("scipy")):
+            print(f"   for --gurobi (Gurobi {g_ver}): \"{sys.executable}\" -m pip install \"times-os[gurobi]\" gurobipy=={g_ver}")
+    elif "--skip-install" not in args:
         print("1. Python packages (.venv, pip install -r requirements.txt) ...")
         code, out, t = call([sys.executable, "-m", "pip", "install", "-r", os.path.join(ROOT, "requirements.txt")])
         print("   " + ("done" if code == 0 else "FAILED:\n" + out[-2000:]) + f"  ({t:.0f} s)")
@@ -1311,8 +1617,8 @@ def setup(args):
         s["segment_heap"] = {"status": "off", "why": "setup --no-segheap"}
         write(SETTINGS, json.dumps(s, indent=1))
         print("   no Segment Heap copy (setup --no-segheap): the preprocessor runs on Windows's default heap")
-    elif WIN and in_project_venv():
-        print("   the preprocessor's interpreter on the Segment Heap (.venv/segheap) ...")
+    elif WIN and (INSTALLED or in_project_venv()):
+        print(f"   the preprocessor's interpreter on the Segment Heap ({for_settings(SEGHEAP)}) ...")
         s["segment_heap"] = make_segheap()
         write(SETTINGS, json.dumps(s, indent=1))
         print("   " + (("done: the preprocessor runs on the Segment Heap" + (f" ({s['segment_heap']['how']})" if s["segment_heap"].get("how") else ""))
@@ -1326,12 +1632,24 @@ def setup(args):
         src = other if other and times_version(other) == PORT_VERSION else (fetch_times_source(src) or src)
     if src and times_version(src) != PORT_VERSION:
         print(f"   TIMES source is v{times_version(src)}; this implementation follows v{PORT_VERSION}")
-    julia = find_julia(opt("--julia"))
+    julia = find_julia(opt("--julia"), check=True)
+    for exe, old in JULIA_OLD:
+        print(f"   Julia: {exe} is {old}; times-os needs Julia 1.11 or newer"
+              + (" (setup --julia gave it)" if opt("--julia") and os.path.abspath(opt("--julia")) == exe else "")
+              + ": it is left as it is, and not used")
+    if opt("--julia") and any(os.path.abspath(opt("--julia")) == exe for exe, _ in JULIA_OLD):
+        print("   Give a Julia of 1.11 or newer with --julia, or leave --julia out and setup takes or installs one.")
+        return 1
     if opt("--install-julia") or (not julia and not opt("--julia") and "--no-julia-install" not in args):
-        print("2. Julia " + (f"(--install-julia {opt('--install-julia')})" if opt("--install-julia") else "was not found: installing it") + " ...")
+        print("2. Julia " + (f"(--install-julia {opt('--install-julia')})" if opt("--install-julia") else
+                             "1.11 or newer was not found: installing it beside the older one" if JULIA_OLD else
+                             "was not found: installing it") + " ...")
         julia = install_julia(opt("--install-julia")) or julia
     if julia:
         s["julia"] = for_settings(julia)
+        v = re.search(r"julia version (\d+\.\d+\.\d+\S*)", call([julia, "--version"], timeout=1800)[1] or "")
+        if v:           # kept for the runs (julia_version_of): they do not ask it again
+            s["julia_version"] = {"julia": for_settings(julia), "version": v.group(1)}
         if "--skip-install" not in args:
             print("3. Julia packages (TimesEq from this repository, JuMP, HiGHS, Ipopt; several minutes the first time) ...")
             write_workload(src, "dev" if "--dev" in args else "full")
@@ -1348,18 +1666,23 @@ def setup(args):
                 print("   stochastic TIMES (STAGES, SPINES): --dev leaves its add-on out; the first run of such a model compiles it")
             code, out, t = call([julia, "--startup-file=no", f"--project={JULIA_ENV}", "-e",
                                  f'using Pkg; Pkg.develop([Pkg.PackageSpec(path="{path}"), Pkg.PackageSpec(path="{kpath}"){addon}]); '
-                                 f'Pkg.add(["JuMP", "HiGHS", "Ipopt"]); {leave}Pkg.precompile()'], env={"JULIA_PKG_PRECOMPILE_AUTO": "0"}, timeout=7200)
+                                 f'Pkg.add(["JuMP", "HiGHS", "Ipopt"]); {leave}Pkg.precompile()'], env={"JULIA_PKG_PRECOMPILE_AUTO": "0"}, timeout=7200,
+                                # installed: its output in the data folder as it comes (the setup's sign of life reads it)
+                                log=os.path.join(PART, JULIA_PACKAGES_LOG) if INSTALLED else None)
             s["setup"] = kind
             if code == 0 and julia_error(out):              # Pkg.precompile can report a failed package and still exit 0
                 code = 1
-            print("   " + ("done" if code == 0 else "FAILED:\n" + out[-3000:]) + f"  ({t:.0f} s)")
-            if code == 0:
+            installed = julia_packages_installed()
+            print("   " + julia_step_line(code, out, installed) + f"  ({t:.0f} s)")
+            if julia_step_ok(code, installed):     # also stopped at its limit with the packages installed
                 pin_timeseq_path()
                 # where libjulia is, for the kernels the preprocessor runs in its own process (timespp/kernels.py)
                 bc, bout, _ = call([julia, "--startup-file=no", "-e", "print(Sys.BINDIR)"], timeout=600)
                 bindir = bout.strip().splitlines()[-1] if bc == 0 and bout.strip() else ""
                 if os.path.isdir(bindir):
                     s["julia_bindir"] = bindir
+                    if INSTALLED:
+                        os.environ["TIMESPP_JULIA_BINDIR"] = bindir
     else:
         print("3. Julia is not installed (see above): the Julia packages are not installed either.")
     if src:
@@ -1375,16 +1698,27 @@ def setup(args):
         print("\nSetup is not complete.  Do what the MISSING lines say and run setup again.")
         return 1
     if "--no-test" in args:
+        record_setup()
         return 0
     print("\nThe example model (models/DemoS_012, compared with its published GAMS result) ...\n")
-    code = run([example_copy(), "--out", os.path.join(ROOT, "runs", "_setup_test")])
-    rep = json.loads(read(os.path.join(ROOT, "runs", "_setup_test", "DemoS_012", "report_DemoS_012.json")))
+    code = run([example_copy(), "--out", os.path.join(PART, "runs", "_setup_test")], settings_files=False)
+    rep = json.loads(read(os.path.join(PART, "runs", "_setup_test", "DemoS_012", "report_DemoS_012.json")))
     want = json.loads(read(os.path.join(ROOT, "models", "DemoS_012", "expected.json")))
     obj = rep.get("julia", {}).get("objective")
     good = obj is not None and abs(obj - want["objective"]) <= 1e-9 * abs(want["objective"]) and rep["verdict"].split(":")[0] in ("SAME", "SAME OBJECTIVE", "SOLVED")
     print("\nSetup " + (f"is complete: the example gives the expected objective {want['objective']}" + (", and the model is the published GAMS one." if rep["verdict"].startswith("SAME") else ".")
-          if good else f"FAILED on the example: {rep['verdict']}\nSee {os.path.join(ROOT, 'runs', '_setup_test', 'DemoS_012', 'report_DemoS_012.txt')}"))
+          if good else f"FAILED on the example: {rep['verdict']}\nSee {os.path.join(PART, 'runs', '_setup_test', 'DemoS_012', 'report_DemoS_012.txt')}"))
+    if good:
+        record_setup()
     return 0 if good else 1
+
+
+def record_setup():
+    """Installed: the setup is finished for this version, this place of the code and this Python (setup_key)."""
+    if INSTALLED:
+        s = settings()
+        s["installed"] = dict(setup_key(), finished=datetime.datetime.now().isoformat(timespec="seconds"))
+        write(SETTINGS, json.dumps(s, indent=1))
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1781,6 +2115,49 @@ def within(a, b):
     return a == b or a.startswith(b.rstrip(os.sep) + os.sep)
 
 
+RUN_FILES = []                          # the settings files (times-os.toml) this run read: named in its report
+RESULTS_NAME = "times-os-runs"          # installed: the folder of results beside the run folders
+RUN_DEFAULT = None                      # installed: the default result folder of the cases of this run (default_out)
+
+
+def installed_out(cases, probe=True):
+    """Installed, the results without --out: times-os-runs in the folder that holds the run folder (C:\\models\\MyCase
+    gives C:\\models\\times-os-runs\\MyCase); for several cases one for all, in the lowest folder that holds every run
+    folder (siblings: their parent; at different depths: the higher one's); run folders on different drives: beside
+    the first.  probe: try that it can be made and written there (with --out nothing is made or tried there).
+    -> (the folder, None) or (the folder, why it cannot be written)."""
+    runs = [os.path.normpath(os.path.dirname(c) if is_run_file(c) else c) for c in (os.path.abspath(c) for c in cases)]
+    base = os.path.dirname(runs[0])
+    if len(runs) > 1:
+        try:
+            base = os.path.commonpath(runs)
+        except ValueError:                  # on different drives: no folder holds them all
+            base = os.path.dirname(runs[0])
+        if any(os.path.normcase(base) == os.path.normcase(r) for r in runs):    # a run folder holding the others
+            base = os.path.dirname(base)
+    out = os.path.join(base, RESULTS_NAME)
+    if not probe:
+        return out, None
+    # it can be made there, and written (directly under a drive too, where a user may make a folder but not a file)
+    made = False
+    try:
+        import tempfile
+        if not os.path.isdir(out):
+            os.mkdir(out)
+            made = True
+        with tempfile.TemporaryFile(dir=out):
+            pass
+    except OSError as x:
+        return out, f"{out} cannot be {'written' if os.path.isdir(out) else 'made'}: {x.strerror or x}"
+    finally:
+        if made:
+            try:
+                os.rmdir(out)
+            except OSError:
+                pass
+    return out, None
+
+
 def result_folders(cases, out_root):
     """-> ([(case, its result folder)], [problems]): one result folder per case under out_root, distinct (a second case of
     the same name gets <name>_2, ...), never the run folder itself, inside it, or holding it; and a folder that exists is
@@ -1880,6 +2257,8 @@ def one_case(folder, out_root, o, case=None):
          "environment": {"code": revision(), "port_follows_TIMES": PORT_VERSION, "os": platform.platform(), "python": platform.python_version(),
                          "times_source": src, "times_source_version": times_version(src) if src else None, "julia": julia, "gams": gams},
          "notes": [], "timings": {}}
+    if RUN_FILES:                                   # the settings files (times-os.toml) that gave this run's defaults
+        R["settings_files"] = list(RUN_FILES)
     notes = R["notes"]
 
     def finish(verdict):
@@ -2028,7 +2407,7 @@ def one_case(folder, out_root, o, case=None):
     points = o.get("points", []) + [p for p in (setting("POINTS") or "").split(os.pathsep) if p.strip()]
     if points:
         pp_env["TIMESPP_POINTS"] = os.pathsep.join(os.path.abspath(p) for p in points)
-    pp_env["TIMESPP_RESULTS"] = os.pathsep.join(dict.fromkeys([out_root, os.path.join(ROOT, "runs")]))
+    pp_env["TIMESPP_RESULTS"] = os.pathsep.join(dict.fromkeys([out_root, default_out()]))
     # compared with a run of TIMES in GAMS: both start from the results of earlier runs that GAMS reads (refpoint.py)
     if o["gams"] in ("run", "reuse") or (o["gams"] is None and bool(gams) and (bool(o["check"]) or not o["solve"])):
         pp_env["TIMESPP_BASE_FROM_GAMS"] = "1"
@@ -2150,7 +2529,7 @@ def one_case(folder, out_root, o, case=None):
             mode = "reuse" if user_lst else "skip"
         if mode == "run":
             if not gams:
-                notes.append("GAMS was not found, so it was not run (python TIMES.py setup --gams <gams executable>)")
+                notes.append(f"GAMS was not found, so it was not run ({PROG} setup --gams <gams executable>)")
                 mode = "reuse" if user_lst else "skip"
             elif not o["solve"]:                            # --no-solve: GAMS generates the model and writes its matrix; nothing is solved on either side
                 code, t, got = gams_matrix()
@@ -2296,7 +2675,7 @@ def one_case(folder, out_root, o, case=None):
     J = None
     if P["status"] == "ok":
         if not julia:
-            notes.append("Julia was not found (python TIMES.py setup)")
+            notes.append(f"Julia was not found ({PROG} setup)")
         else:
             print(f"[{case}] " + (f"building the model in Julia and solving it with {o['lp'].upper()} {'through Python (gurobipy)' if o['lp'] == 'gurobipy' else 'through GAMS'} ..." if o["solve"] and o["lp"] != "highs"
                                    else "building and solving the model in Julia (HiGHS) ..." if o["solve"]
@@ -2627,10 +3006,10 @@ def judge(R, o):
         M["same_model"] or diffs.append("matrix")
     elif timing:
         R["checks"].append(["4", "matrix, entry by entry", "not yet", "", "a myopic run: compared step by step while it runs, with --check inline" if several else
-                            "after the timing: --check, or python TIMES.py verify <result folder>"])
+                            f"after the timing: --check, or {PROG} verify <result folder>"])
     else:
         R["checks"].append(["4", "matrix, entry by entry", "not made", "", "needs the GAMS matrix (--gams run, or gams_matrix.db3 in a reference folder)" if not (G and G.get("matrix_file")) else ""])
-    pending = "; the matrix is not checked yet (" + ("a myopic run: --check inline" if several else "--check, or python TIMES.py verify") + ")"
+    pending = "; the matrix is not checked yet (" + ("a myopic run: --check inline" if several else f"--check, or {PROG} verify") + ")"
 
     if P.get("status") == "unsupported":
         n = len(P["unsupported"])
@@ -2638,7 +3017,7 @@ def judge(R, o):
     if P.get("status") != "ok":
         return f"ERROR: the preprocessor failed in '{P.get('stopped_in')}'"
     if not J:
-        return "ERROR: Julia is not set up (python TIMES.py setup)"
+        return f"ERROR: Julia is not set up ({PROG} setup)"
     if J.get("stage") != "done":
         err = J.get("error") or ""
         if JU:
@@ -3348,6 +3727,8 @@ def report_text(R):
     add(f"when     {R['started']}    total {R['timings'].get('total', '-')} s")
     if R.get("time_limit") and (R.get("run_options") or {}).get("solve", True):
         add(f"limit   {R['time_limit']['seconds']:g} s for each solve    ({R['time_limit']['from']})")
+    if R.get("settings_files"):
+        add(f"settings {'; '.join(R['settings_files'])}    (the defaults of run's options: {SETTINGS_FILE})")
     add("")
     add("This file is written by TIMES.py. It is complete in itself: everything needed to understand")
     add("the result is below; the files it names are in the same folder.")
@@ -3592,17 +3973,223 @@ def report_text(R):
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# the settings file of run (times-os.toml): the defaults of its options
+
+SETTINGS_FILE = "times-os.toml"
+# Every option of run, by its long name, and its kind: what a settings file may give for it. The parser below (run)
+# reads the same options; a new option there is a new line here (times_pp/tests/test_data_folder.py checks that the
+# two agree). Kinds: switch (true/false), text, int, number, path (a relative one is taken from the file's folder),
+# texts and paths (a repeated option: a list), and switch-or-text (true, or the option's value).
+RUN_OPTIONS = {
+    "out": ("path", "runs/ in the repository; installed: times-os-runs beside the run folders"),
+    "times": ("path", "the TIMES source that setup found"), "gams": ("text", "a GAMS result in the run folder is read"),
+    "solver": ("text", "auto"), "threads": ("int", "0 (as many as useful)"), "time-limit": ("number", "the run file's RESLIM"),
+    "tolerance": ("number", "1e-06"), "check": ("switch-or-text", "false"), "no-solve": ("switch", "false"),
+    "solve": ("switch", "false"), "max-solve-rows": ("number", "2000000"), "highs-option": ("texts", "none"),
+    "lp": ("text", "highs"), "cplex": ("switch", "false"), "gurobi": ("switch", "false"),
+    "solver-option": ("texts", "none"), "gams-exe": ("path", "TIMES_GAMS, settings.json, the PATH"),
+    "lp-names": ("switch", "false"), "points": ("paths", "none"), "cases": ("paths", "none"),
+    "jacobian": ("switch-or-text", "false"), "db3": ("switch", "false"), "bundle": ("switch", "false"),
+    "keep": ("switch", "false"), "no-report": ("switch", "false"), "low-memory": ("switch", "false"),
+    "profile": ("switch-or-text", "false"), "quiet": ("switch", "false"),
+}
+RUN_ENV = {"points": "POINTS", "gams-exe": "GAMS"}      # options that a TIMES_<name> setting also gives
+COMMAND_LINE_ONLY = {"cases": "it would add its cases to every run, beside the run folders the command line names"}
+SETTINGS_END = "--(end of the settings files)"   # run: put after the words of the settings files, so that an option
+#                                                  of theirs with an optional value never takes a word of the command line
+
+
+def settings_files_on():
+    """TIMES_SETTINGS_FILES=0: no times-os.toml is read (the checks of a release set it for every run they start)."""
+    return setting("SETTINGS_FILES", "1") != "0"
+
+
+def takes_value(name, nxt):
+    """Whether option --name takes the next word of a command line as its value."""
+    kind = RUN_OPTIONS[name][0]
+    if kind == "switch":
+        return False
+    if kind != "switch-or-text":
+        return True
+    if nxt is None:
+        return False
+    if name == "check":
+        return nxt.lower() in ("inline", "after")
+    if name == "profile":
+        return nxt in ("cpu", "allocs")
+    return not (nxt.startswith("--") or glob.has_magic(nxt) or is_case_folder(nxt))       # jacobian: as run reads it
+
+
+def settings_places(base):
+    """-> [the nearest times-os.toml going up from base to the drive's root, the user's own (in the home folder)], each
+    a path or None."""
+    near, d = None, os.path.abspath(base)
+    while True:
+        if os.path.isfile(os.path.join(d, SETTINGS_FILE)):
+            near = os.path.join(d, SETTINGS_FILE)
+            break
+        if os.path.dirname(d) == d:
+            break
+        d = os.path.dirname(d)
+    home = os.path.join(os.path.expanduser("~"), SETTINGS_FILE)
+    home = home if os.path.isfile(home) else None
+    if near and home and os.path.normcase(os.path.abspath(near)) == os.path.normcase(os.path.abspath(home)):
+        near = None                                     # the home folder is the nearest: it is the user's own
+    return [near, home]
+
+
+def read_settings_file(path):
+    """-> ({option: value} with relative paths taken from the file's folder, None) or (None, what is wrong)."""
+    import tomllib
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as x:
+        return None, f"{path}: not a TOML file that can be read ({x})"
+    here, out = os.path.dirname(os.path.abspath(path)), {}
+    for key, v in data.items():
+        if key in COMMAND_LINE_ONLY:
+            return None, f"{path}: {key} is given on the command line only ({COMMAND_LINE_ONLY[key]})"
+        if key not in RUN_OPTIONS:
+            keys = sorted(k for k in RUN_OPTIONS if k not in COMMAND_LINE_ONLY)
+            return None, f"{path}: {key} is not an option of run (the options: {', '.join(keys)})"
+        kind = RUN_OPTIONS[key][0]
+        ok = {"switch": isinstance(v, bool), "text": isinstance(v, str), "path": isinstance(v, str),
+              "int": isinstance(v, int) and not isinstance(v, bool),
+              "number": isinstance(v, (int, float)) and not isinstance(v, bool),
+              "texts": isinstance(v, list) and all(isinstance(x, str) for x in v),
+              "paths": isinstance(v, list) and all(isinstance(x, str) for x in v),
+              "switch-or-text": isinstance(v, (bool, str))}[kind]
+        if not ok:
+            want = {"switch": "true or false", "text": "a text in quotes", "path": "a path in quotes", "int": "a whole number",
+                    "number": "a number", "texts": "a list of texts, [\"...\", ...]", "paths": "a list of paths, [\"...\", ...]",
+                    "switch-or-text": "true, false, or a text in quotes"}[kind]
+            return None, f"{path}: {key} = {v!r} is not {want}"
+        if kind == "path":
+            v = os.path.normpath(os.path.join(here, os.path.expanduser(v)))
+        elif kind == "paths":
+            v = [os.path.normpath(os.path.join(here, os.path.expanduser(x))) for x in v]
+        out[key] = v
+    return out, None
+
+
+def settings_base(folders):
+    """The folder the search for times-os.toml starts from: the one that holds the run folder of the command line
+    (several: their common folder; none given: the current folder)."""
+    held = []
+    for f in folders:
+        f = f if os.path.exists(f) or not os.path.exists(f + ".run") else f + ".run"
+        f = os.path.abspath(f)
+        if is_run_file(f):
+            held.append(os.path.dirname(os.path.dirname(f)))
+        elif os.path.isdir(f):
+            held.append(os.path.dirname(f) if run_files(f) else f)
+    if not held:
+        return os.getcwd()
+    try:
+        return os.path.commonpath(held)
+    except ValueError:
+        return held[0]
+
+
+def run_settings(args):
+    """The defaults that the settings files give run. -> (the words to put before the command line, the files read,
+    [(option, value, where it comes from)] for config, None) or (_, _, _, what is wrong).
+    The order: the command line, then the TIMES_<name> settings, then the nearest times-os.toml (going up from the
+    folder that holds the run folder), then the user's own (in the home folder), then the built-in default."""
+    given, folders, i = set(), [], 0
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--") and a[2:] in RUN_OPTIONS:
+            given.add(a[2:])
+            if takes_value(a[2:], args[i + 1] if i + 1 < len(args) else None):
+                i += 1
+        elif not a.startswith("--"):
+            folders.append(a)
+        i += 1
+    near, home = settings_places(settings_base(folders)) if settings_files_on() else (None, None)
+    merged, read_files = {}, []
+    for path in (home, near):                           # the nearest file last: its keys win
+        if path:
+            values, wrong = read_settings_file(path)
+            if wrong:
+                return [], [], [], wrong
+            read_files.insert(0, path)
+            merged.update({k: (v, path) for k, v in values.items()})
+    shown = []
+    for key in RUN_OPTIONS:
+        env = RUN_ENV.get(key)
+        if key in given:
+            shown.append((key, "(the command line)", "command line"))
+        elif env and setting(env):
+            shown.append((key, setting(env), f"environment (TIMES_{env})"))
+        elif key in merged:
+            shown.append((key, merged[key][0], merged[key][1]))
+        else:
+            shown.append((key, RUN_OPTIONS[key][1], "default"))
+    words = []
+    for key, value, where in shown:
+        if where in ("command line", "default") or where.startswith("environment"):
+            continue
+        kind = RUN_OPTIONS[key][0]
+        if value is True:
+            words.append("--" + key)
+        elif value is False:
+            continue
+        elif kind in ("texts", "paths"):
+            for v in value:
+                words += ["--" + key, str(v)]
+        else:
+            words += ["--" + key, str(value)]
+    return words + [SETTINGS_END] if words else [], read_files, shown, None
+
+
+def config(args):
+    """config [<run folder>]: every option of run with the value in force for a run of that folder (default: the
+    current folder) and where it comes from, and the two places a settings file is looked for."""
+    base = settings_base(args) if args else os.getcwd()
+    words, files, shown, wrong = run_settings(list(args))
+    if wrong:
+        print(wrong + "\nNothing else is said: correct the file first.")
+        return 2
+    if not settings_files_on():
+        print(f"TIMES_SETTINGS_FILES=0: no settings file of run ({SETTINGS_FILE}) is read.\n")
+        near = home = None
+    else:
+        near, home = settings_places(base)
+    print(f"The settings files of run ({SETTINGS_FILE}), looked for in two places:\n"
+          f"  1. the nearest going up from {base} to the drive's root: {near or 'none found'}\n"
+          f"  2. your own, {os.path.join(os.path.expanduser('~'), SETTINGS_FILE)}: {'found' if home else 'not there'}\n"
+          "A key in 1 wins over the same key in 2; the TIMES_<name> settings win over both, and the command line over all.\n")
+    width = max(len(k) for k in RUN_OPTIONS) + 2
+    for key, value, where in shown:
+        v = value if where == "default" or (isinstance(value, str) and where.startswith("environment")) else json.dumps(value)
+        print(f"  {key:<{width}} {v}   ({where})")
+    return 0
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # run
-def run(args):
+def run(args, settings_files=True):
+    """run <run folder> ... [options]; settings_files=False: no times-os.toml is read (setup's own test of the example)."""
     global TIMES_GIVEN
+    words, files, _, wrong = run_settings(args) if settings_files else ([], [], [], None)
+    if wrong:
+        print(wrong + ". Nothing was run.")
+        return 2
+    if files:
+        print("Settings files read: " + "; ".join(files), flush=True)
+    RUN_FILES[:] = files
+    args = words + list(args)
     o = {"check": None, "matrix": False, "solve": True, "gams": None, "solver": "auto", "threads": 0, "highs_options": [], "time_limit": None, "gams_limit": None, "pp_limit": 7200, "tolerance": 1e-6, "bundle": False, "keep": False, "profile": "",
          "force_solve": False, "max_solve_rows": 2000000, "report": True, "low_memory": False, "milestones": None, "db3": False, "jacobian": None,
          "lp": "highs", "solver_options": [], "gams_exe": None, "lp_names": False, "points": []}
-    out_root, folders, i = os.path.join(ROOT, "runs"), [], 0       # folders: (what was given, how) in order
+    global RUN_DEFAULT
+    out_root, out_given, folders, i = default_out(), False, [], 0       # folders: (what was given, how) in order
     while i < len(args):
         a = args[i]
         if a == "--out":
-            out_root = os.path.abspath(args[i + 1]); i += 1
+            out_root, out_given = os.path.abspath(args[i + 1]), True; i += 1
         elif a == "--points":
             if i + 1 >= len(args):
                 print("--points needs a folder: the result folder or the run folder of an earlier run")
@@ -3643,6 +4230,8 @@ def run(args):
             o["tolerance"] = float(args[i + 1]); i += 1
         elif a in ("--bundle", "--keep", "--db3"):
             o[a[2:]] = True
+        elif a == SETTINGS_END:
+            pass
         elif a == "--check":
             o["check"] = "after"
             if i + 1 < len(args) and args[i + 1].lower() in ("inline", "after"):
@@ -3689,7 +4278,7 @@ def run(args):
             folders.append((a, "arg"))
         i += 1
     if o["gams"] not in (None, "models", "run", "reuse", "skip") or o["solver"] not in ("auto", "simplex", "ipm", "hipo", "ipx"):
-        print(__doc__)
+        print(usage())
         return 2
     if o["lp"] == "gurobipy":
         o["gams_exe"] = ""
@@ -3698,9 +4287,14 @@ def run(args):
         missing = [p for p in ("gurobipy", "scipy") if importlib.util.find_spec(p) is None]
         if missing:
             g_ver, g_home = find_gurobi()
+            if INSTALLED:           # installed by pip: the package's extra brings them
+                print(f"--gurobi needs the Python packages gurobipy and scipy ({', '.join(missing)} not found in {sys.executable}); they come with:\n"
+                      f"  \"{sys.executable}\" -m pip install \"times-os[gurobi]\"" + (f" gurobipy=={g_ver}   (for Gurobi {g_ver} in {g_home})" if g_ver else
+                      "   (and gurobipy==<the version of your Gurobi licence>)"))
+                return 2
             print(f"--gurobi needs the Python packages gurobipy and scipy ({', '.join(missing)} not found in {sys.executable}):\n"
-                  + (f"  python TIMES.py setup   (it installs gurobipy {g_ver}, for Gurobi {g_ver} in {g_home})" if g_ver else
-                     "  python TIMES.py setup --gurobi <the version of your Gurobi licence>\n"
+                  + (f"  {PROG} setup   (it installs gurobipy {g_ver}, for Gurobi {g_ver} in {g_home})" if g_ver else
+                     f"  {PROG} setup --gurobi <the version of your Gurobi licence>\n"
                      f"  or: {sys.executable} -m pip install gurobipy==<the version of your Gurobi licence> scipy"))
             return 2
     elif o["lp"] != "highs":
@@ -3719,8 +4313,15 @@ def run(args):
     if cases is None:
         return 2
     if not cases:
-        print(__doc__)
+        print(usage())
         return 2
+    if INSTALLED:       # installed by pip: the results go beside the run folders (installed_out), unless --out says
+        RUN_DEFAULT, why = installed_out(cases, probe=not out_given)     # --out: nothing is tried beside the model
+        if not out_given:
+            out_root = RUN_DEFAULT
+            if why:
+                print(f"Nothing was run: the results would go to {out_root}, and {why}. Give --out <folder> for them.")
+                return 2
     planned, problems = result_folders(cases, out_root)
     if problems:
         print("Nothing was run; the result folders would harm the input:\n  " + "\n  ".join(problems))
@@ -3734,8 +4335,8 @@ def run(args):
         # (expected.json, gams_matrix.db3) is compared with those, without GAMS.
         here = lambda c, f: os.path.exists(os.path.join(os.path.dirname(c) if is_run_file(c) else c, f))
         if o["gams"] == "run" or not all(here(c, "expected.json") and here(c, "gams_matrix.db3") for c in cases):
-            missing = ([] if find_gams() else ["GAMS (python TIMES.py setup --gams <gams executable>)"]) + \
-                      ([] if find_times() else [f"the TIMES source v{PORT_VERSION} (--times <TIMES source folder>; python TIMES.py setup "
+            missing = ([] if find_gams() else [f"GAMS ({PROG} setup --gams <gams executable>)"]) + \
+                      ([] if find_times() else [f"the TIMES source v{PORT_VERSION} (--times <TIMES source folder>; {PROG} setup "
                                                 "fetches it when GAMS is found)"])
             if missing:
                 print("--check compares the model with TIMES in GAMS, which needs " + " and ".join(missing) + ".  Nothing was run.")
@@ -3744,6 +4345,11 @@ def run(args):
         glob.glob(os.path.join(d, "*.lst")) and not os.path.exists(os.path.join(d, "expected.json")) for d in (os.path.dirname(c) if is_run_file(c) else c for c in cases)))   # a published reference needs no GAMS at all
     if needs_gdx:                                           # without the GDX reader no GAMS result can be compared: settle it before the long steps
         missing = [m for m in python_packages()[1] if m[0] in ("gams.transfer", "gamspy_base")]
+        if missing and INSTALLED:       # installed by pip: the package's extra brings them
+            print("This run reads or writes GAMS files (GDX), and the GDX packages are not installed. They come with:\n\n"
+                  f"    \"{sys.executable}\" -m pip install \"times-os[gdx]\"\n\n"
+                  "(gamspy_base comes under the GAMS licence), or use --gams skip to solve without comparing.  Nothing was run.")
+            return 2
         if missing:
             pips = sorted({m[1] for m in missing})
             print(f"The GDX packages (GAMS result and matrix files) are not installed in this Python ({sys.executable}). Installing: {' '.join(pips)}"
@@ -3759,7 +4365,9 @@ def run(args):
             print(f"   done  ({t:.0f} s)", flush=True)
     os.makedirs(out_root, exist_ok=True)
     refresh_workload()
-    compile_notice(locate(settings().get("julia")) or find_julia())
+    julia = locate(settings().get("julia")) or find_julia()
+    old_julia_notice(julia)
+    compile_notice(julia)
     # phase 1, the timing: every case in turn, its report and the summary written as soon as it is done
     reports = []
     for c, (name, _) in zip(cases, planned):
@@ -3784,6 +4392,8 @@ def run(args):
     if len(cases) > 1:
         write(os.path.join(out_root, "summary.txt"), summary_text(reports, how, len(cases)))
         print(f"\nsummary: {os.path.join(out_root, 'summary.txt')}")
+    update_check_end()                  # installed: a newer version on PyPI, in one line, before the last line
+    print(f"\nOutput files available here: {planned[0][1] if len(cases) == 1 else out_root}", flush=True)
     return exit_status(reports, stopped)
 
 
@@ -3872,7 +4482,7 @@ def verify(args):
         else:
             folders += sorted(glob.glob(a)) if glob.has_magic(a) else [a]
     if not folders:
-        print(__doc__)
+        print(usage())
         return 2
     code = 0
     for f in folders:
@@ -3955,6 +4565,396 @@ def summary_text(reports, how=None, total=None):
     return "\n".join(L) + "\n"
 
 
+# ----------------------------------------------------------------------------------------------------------------
+# installed by pip (times-os): what a clone of the repository gave without a command
+def usage():
+    """The help, with the name the program was started by."""
+    return __doc__.replace("python TIMES.py", PROG)
+
+
+# installed by pip: a beta feature of this release (cloning is the regular way); said by --version, check and the
+# message before the first setup, not at every run
+BETA = ("Installed with pip: a beta feature; tell us what you find: https://github.com/kanors-emr/TIMES-OS/issues "
+        "or times-os@kanors.com")
+
+
+def version_text():
+    """times-os --version: this version, the TIMES version followed, and Python's; installed, the beta line."""
+    me = f"times-os {INSTALLED['version']}" if INSTALLED else f"TIMES-OS from a checkout ({revision()})"
+    return (f"{me}; follows TIMES {PORT_VERSION}; Python {platform.python_version()} ({sys.executable})"
+            + (f"\n{BETA}" if INSTALLED else ""))
+
+
+class _Tee:
+    """Output to the console and to a log file; with `show`, the console gets only the lines it accepts. It keeps the
+    time of the last line the console got and the setup's step (for setup_logged's sign of life)."""
+
+    STEP = re.compile(r"\d\. |The example model")
+
+    def __init__(self, log, out, show=None):
+        import threading
+        self.log, self.out, self.show, self.part, self.seen = log, out, show, "", ""
+        self.said, self.step, self.lock = time.time(), "", threading.Lock()
+
+    def write(self, s):
+        with self.lock:
+            self.log.write(s)
+            self.seen += s
+            *done, self.seen = self.seen.split("\n")
+            for line in done:
+                if self.STEP.match(line.strip()):
+                    self.step = re.sub(r"\s*\(.*|\s*\.\.\.\s*$", "", line.strip())[:60]
+            if self.show is None:
+                self.out.write(s)
+                self.said = time.time()
+                return
+            self.part += s
+            *lines, self.part = self.part.split("\n")
+            for line in lines:
+                if self.show(line):
+                    self.out.write(line + "\n")
+                    self.out.flush()
+                    self.said = time.time()
+
+    def pulse(self, line):
+        """A line for the console only."""
+        with self.lock:
+            self.out.write(line + "\n")
+            self.out.flush()
+            self.said = time.time()
+
+    def flush(self):
+        self.log.flush()
+        self.out.flush()
+
+
+JULIA_PACKAGES_LOG = "julia_packages.log"      # installed: the setup's Julia step writes its output there as it comes
+
+
+def julia_doing():
+    """Installed, during setup: what the Julia step is doing, from its output so far: compiling the packages (and
+    which are done: Julia names each when it is compiled), or else its last line (the package it installs)."""
+    path = os.path.join(PART, JULIA_PACKAGES_LOG)
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    lines = [re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", l)).strip() for l in text.splitlines()]
+    lines = [l for l in lines if l]
+    if not lines:
+        return ""
+    start = max((i for i, l in enumerate(lines) if l.startswith("Precompiling")), default=None)
+    if start is None:
+        m = re.search(r"\[[0-9a-f]{8}\] \+ (\S+) (v\S+)", lines[-1])        # Pkg: "[uuid] + JuMP v1.32.1"
+        return f"adding {m.group(1)} {m.group(2)}" if m else lines[-1][:80]
+    done = [m.group(1) for l in lines[start + 1:] for m in [re.search(r"✓ (\S+)$", l)] if m]
+    return "compiling its packages" + (f"; done: {', '.join(done[-4:])}" if done else "")
+
+
+def setup_logged(args, quiet=False):
+    """Installed: setup, its output also in setup.log in this environment's part of the data folder (quiet: on the console only its steps and its
+    end); while it runs, a sign of life at least once a minute (its step, the minutes so far, what Julia is doing);
+    a failed setup ends with the log's full path."""
+    import threading
+    os.makedirs(PART, exist_ok=True)
+    if PART != STATE:
+        write(os.path.join(PART, "environment.txt"), "The part of times-os's data folder for one environment:\n"
+              f"Python {os.path.abspath(sys.prefix)}\ncode {ROOT}\n")
+    log = os.path.join(PART, "setup.log")
+    out = sys.stdout
+    t0 = time.time()
+    with open(log, "w", encoding="utf-8", errors="replace") as f:
+        f.write(f"{version_text()}\ncode: {ROOT}\ndata folder: {STATE}\npart: {PART}\n{datetime.datetime.now().isoformat(timespec='seconds')}: setup {' '.join(args)}\n\n")
+        tee = _Tee(f, out, (lambda l: bool(re.match(r"\d\. |   (done|FAILED|stopped after|NOT made|not this way|Julia|downloading)|Setup ", l))) if quiet else None)
+        sys.stdout = tee
+        stop = threading.Event()
+
+        def pulse():
+            while not stop.wait(5):
+                if time.time() - tee.said >= 60:
+                    doing = julia_doing() if tee.step.startswith("3.") else ""
+                    tee.pulse(f"   ... {tee.step or 'setting up'}: {(time.time() - t0) / 60:.0f} min so far"
+                              + (f" (Julia: {doing})" if doing else ""))
+        beat = threading.Thread(target=pulse, daemon=True)
+        beat.start()
+        try:
+            code = setup(args)
+        except Exception:
+            import traceback
+            print(traceback.format_exc())
+            code = 1
+        finally:
+            stop.set()
+            beat.join(10)
+            sys.stdout.flush()
+            sys.stdout = out
+    if code:
+        print(f"\nThe setup did not finish. Its log: {log}")
+    return code
+
+
+LOCK_STALE = 6 * 3600          # installed: a setup lock older than this (seconds) is taken over
+
+
+def process_alive(pid):
+    """Whether a process of that number runs on this machine."""
+    if pid <= 0:
+        return False
+    if WIN:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.GetLastError() == 5          # access denied: it is there, another user's
+        code = ctypes.c_ulong()
+        try:
+            return bool(k.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259     # STILL_ACTIVE
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_holder(path):
+    """-> (the setup lock's content, whether it is left behind: its process is gone, or it is older than LOCK_STALE),
+    or (None, False) when there is no lock."""
+    try:
+        text = read(path)
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return None, False
+    try:
+        held = json.loads(text)
+    except ValueError:                                 # being written this moment, or cut: only its age can tell
+        held = {}
+    pid = held.get("pid") if isinstance(held, dict) else None
+    return (held if isinstance(held, dict) else {}), age > LOCK_STALE or (isinstance(pid, int) and not process_alive(pid))
+
+
+def setup_lock(done=None):
+    """Installed: one setup at a time in the data folder. Takes <data folder>/setup.lock (made atomically: the process
+    number and the start time), waiting, with a line a minute, while another process holds it; a lock left behind is
+    taken over, with a line that says so. done: a test made after each wait (the other process's setup may be what this
+    one needs): when it is true, nothing is taken. -> the lock's path to give back to setup_unlock, or None."""
+    path = os.path.join(STATE, "setup.lock")
+    t0 = said = None
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            held, left = lock_holder(path)
+            if held is None:                           # gone between the two looks
+                continue
+            who = (f"process {held.get('pid')}" if held.get("pid") else "another process") + (f", since {held['started']}" if held.get("started") else "")
+            if left:
+                print(f"A setup lock was left behind ({path}: {who}, no longer running or older than "
+                      f"{LOCK_STALE // 3600} hours): it is taken over.", flush=True)
+                mine = path + f".left{os.getpid()}"
+                try:
+                    os.replace(path, mine)             # one process moves it away; the others find it gone
+                    if read(mine) != json.dumps(held) and held:
+                        os.link(mine, path)            # a fresh lock of another process, made meanwhile: put back
+                    os.remove(mine)
+                except OSError:
+                    pass
+                continue
+            if t0 is None:
+                t0 = said = time.time()
+                print(f"Another times-os ({who}) is setting itself up in {STATE}: this one waits for it to finish.", flush=True)
+            elif time.time() - said >= 60:
+                said = time.time()
+                print(f"   still waiting for the setup of {who} ({(said - t0) / 60:.0f} min)", flush=True)
+            time.sleep(2)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"pid": os.getpid(), "started": datetime.datetime.now().isoformat(timespec="seconds")}))
+        if t0 is not None and done and done():
+            setup_unlock(path)
+            return None
+        return path
+
+
+def setup_unlock(path):
+    """The setup lock given back (only this process's own)."""
+    if not path:
+        return
+    try:
+        if json.loads(read(path)).get("pid") == os.getpid():
+            os.remove(path)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def setup_finished():
+    """Installed: whether a setup is finished for this version, this place of the code and this Python."""
+    rec, key = settings().get("installed") or {}, setup_key()
+    return all(rec.get(k) == v for k, v in key.items())
+
+
+def setup_first():
+    """Installed, before run and check: when no setup is finished for this version, this place of the code and this
+    Python (a first run, a pip upgrade), make it now, after one line that says so; when another process is making it,
+    wait for it. -> 0, or setup's exit status."""
+    if setup_finished():
+        return 0
+    lock = setup_lock(done=setup_finished)
+    if lock is None:
+        print("The setup made by the other process is finished: this one goes on.\n", flush=True)
+        return 0
+    try:
+        return setup_first_locked()
+    finally:
+        setup_unlock(lock)
+
+
+def setup_first_locked():
+    rec, key = settings().get("installed") or {}, setup_key()
+    if all(rec.get(k) == v for k, v in key.items()):
+        return 0
+    if not rec:
+        what = "times-os sets itself up first"
+    elif rec.get("version") != key["version"]:
+        what = f"times-os was updated from {rec.get('version')} to {key['version']}: its setup is brought up to date first"
+    else:
+        what = "times-os runs from another place or another Python than it was set up for: its setup is made again first"
+    julia = "" if find_julia() else "Julia is installed, "
+    print(f"{what}: {julia}its Julia packages are installed and compiled, and the example model is run. This happens once and "
+          f"takes some time: from ten minutes on a fast machine to over an hour on a small one. Its steps, and a line "
+          f"at least once a minute, are shown here; everything is in {os.path.join(PART, 'setup.log')}\n", flush=True)
+    if not rec:
+        print(f"{BETA}\n", flush=True)
+    code = setup_logged([], quiet=True)
+    if not code:
+        print("\nThe setup is done.\n", flush=True)
+    return code
+
+
+def example(args):
+    """example <folder>: models/DemoS_012 copied into a new or empty folder, and the line that runs it."""
+    if len(args) != 1:
+        print(f"{PROG} example <folder>: copies the example model DemoS_012 into <folder> (new, or empty)")
+        return 2
+    dest = os.path.abspath(args[0])
+    if os.path.exists(dest) and (not os.path.isdir(dest) or os.listdir(dest)):
+        print(f"{dest} is there and is not an empty folder: nothing was copied. Give a new folder, or an empty one.")
+        return 2
+    shutil.copytree(os.path.join(ROOT, "models", "DemoS_012"), dest, dirs_exist_ok=True)
+    writable(dest)
+    arg = args[0] if " " not in args[0] else f'"{args[0]}"'
+    print(f"The example model DemoS_012 (the run file and its DD files) is in {dest}. Run it with:\n\n    {PROG} run {arg}\n")
+    return 0
+
+
+def folder_size(path):
+    n = 0
+    for d, _, files in os.walk(path):
+        for f in files:
+            try:
+                n += os.path.getsize(os.path.join(d, f))
+            except OSError:
+                pass
+    return n
+
+
+def clean(args):
+    """clean [--yes]: removes the data folder of the installed package, after listing what is in it and asking."""
+    if not INSTALLED:
+        print(f"clean removes what times-os, installed by pip, keeps in its data folder. This is a checkout ({STATE}): "
+              "its settings.json, .venv, .julia_env and runs/ are in the checkout itself; delete them there if you wish.")
+        return 2
+    if not os.path.isdir(STATE) or not os.listdir(STATE):
+        print(f"The data folder {STATE} is empty or not there: nothing to remove.")
+        return 0
+    if not os.path.isfile(os.path.join(STATE, DATA_MARKER)):    # a folder that times-os did not make: never removed
+        print(f"{STATE} is not a data folder that times-os made (it has no {DATA_MARKER}): nothing was removed.")
+        return 2
+    julia = locate(settings().get("julia")) or find_julia()
+    depot = (os.environ.get("JULIA_DEPOT_PATH") or "").split(os.pathsep)[0] or os.path.join(os.path.expanduser("~"), ".julia")
+    print(f"The data folder of times-os: {STATE}\n")
+    total = 0
+    for name in sorted(os.listdir(STATE)):
+        p = os.path.join(STATE, name)
+        size = folder_size(p) if os.path.isdir(p) else os.path.getsize(p)
+        total += size
+        print(f"  {size / 2**20:10,.1f} MB  {name}")
+    print(f"  {total / 2**20:10,.1f} MB  in all\n")
+    inside = julia and within(julia, STATE)
+    print(("Julia installed by times-os is in it (.julia_bin) and goes with it. " if inside else
+           f"Julia itself ({julia}) is left. " if julia else "") +
+          f"Julia's own package store ({depot}: the packages and their compiled code, used by every Julia program) is left; "
+          "remove it yourself if nothing else uses it. Your model folders and results are not touched.")
+    if "--yes" not in args:
+        try:
+            ok = input("\nRemove the data folder? [y/N] ").strip().lower() in ("y", "yes")
+        except EOFError:
+            ok = False
+        if not ok:
+            print("Nothing removed.")
+            return 1
+    def writable(func, path, _):          # a read-only file (git's objects in a fetched TIMES source): made writable
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError:
+            pass
+    shutil.rmtree(STATE, onerror=writable)
+    left = os.path.exists(STATE)
+    print(f"Removed {STATE}." if not left else f"Not all of {STATE} could be removed (a file in use?): remove what is left by hand.")
+    print("To remove the package as well:  pip uninstall times-os")
+    return 1 if left else 0
+
+
+UPDATE = {}                 # the check for a newer version on PyPI (installed only)
+
+
+def update_check_start():
+    """Installed: ask PyPI for the latest version of times-os, in the background, at most once a day; nothing is
+    sent but the request for the package's public page. TIMES_UPDATE_CHECK=0: never."""
+    if not INSTALLED or setting("UPDATE_CHECK", "1") == "0":
+        return
+    f = os.path.join(STATE, "update_check.json")
+    try:
+        last = json.loads(read(f)).get("checked", 0)
+    except (OSError, ValueError, AttributeError):
+        last = 0
+    if time.time() - last < 86400:
+        return
+    import threading
+
+    def get():
+        try:
+            import urllib.request
+            with urllib.request.urlopen("https://pypi.org/pypi/times-os/json", timeout=2) as r:
+                UPDATE["latest"] = json.loads(r.read().decode("utf-8"))["info"]["version"]
+        except Exception:                                    # no network, no answer: nothing is said
+            pass
+    th = threading.Thread(target=get, daemon=True)
+    th.start()
+    UPDATE.update(thread=th, file=f)
+
+
+def update_check_end():
+    """At the end of a run: one line when PyPI has a newer version (waits for the answer 2 seconds at most)."""
+    th = UPDATE.get("thread")
+    if not th:
+        return
+    th.join(2.0)
+    latest = UPDATE.get("latest")
+    try:
+        write(UPDATE["file"], json.dumps({"checked": time.time(), "latest": latest}))
+    except OSError:
+        pass
+    vkey = lambda v: tuple(int(x) for x in re.findall(r"\d+", v or "")[:3])
+    if latest and vkey(latest) > vkey(INSTALLED["version"]):
+        print(f"\ntimes-os {latest} is out (this is {INSTALLED['version']}): pip install -U times-os")
+
+
 def main(argv):
     for stream in (sys.stdout, sys.stderr):
         # a character the console or a redirected file cannot encode (Julia's messages have some) is replaced: a
@@ -3964,22 +4964,52 @@ def main(argv):
         except (AttributeError, ValueError):
             pass
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print(__doc__)
+        print(usage())
         return 0
+    if argv[0] in ("--version", "version"):
+        print(version_text())
+        return 0
+    if argv[0] == "example":
+        return example(argv[1:])
+    if argv[0] == "clean":
+        return clean(argv[1:])
+    if argv[0] == "config":
+        return config(argv[1:])
     if argv[0] in ("check", "run", "verify"):
         forwarded = reexec_in_venv()
         if forwarded is not None:
             return forwarded
+        if argv[0] in ("run", "verify") and never_set_up() and setting("SETUP_CHECK", "1") != "0":
+            # before anything is installed or written (the GDX packages into whatever Python runs this)
+            print(f"This clone has not been set up: {PROG} setup does it, once (the Python and Julia packages, into this "
+                  "folder; Julia too when none of 1.11 or newer is found). Nothing was run.")
+            return 2
+        if argv[0] == "run":
+            wrong = duckdb_problem()[2]
+            if wrong:
+                print(wrong + ". Nothing was run.")
+                return 2
+        if INSTALLED and argv[0] in ("check", "run"):      # installed by pip: the first run sets the package up
+            code = setup_first()
+            if code:
+                return code
     if argv[0] == "setup":
-        return setup(argv[1:])
+        if not INSTALLED:
+            return setup(argv[1:])
+        lock = setup_lock()             # installed: one setup at a time in the data folder, also one given by hand
+        try:
+            return setup_logged(argv[1:])
+        finally:
+            setup_unlock(lock)
     if argv[0] == "check":
         chain, with_gams, _ = check()
         return 0 if chain else 1
     if argv[0] == "run":
+        update_check_start()            # its line, if any, comes just before the run's last line (run)
         return run(argv[1:])
     if argv[0] == "verify":
         return verify(argv[1:])
-    print(__doc__)
+    print(usage())
     return 2
 
 

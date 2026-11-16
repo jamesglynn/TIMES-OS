@@ -18,9 +18,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.12"]
+        julia: ["1.11", "1"]               # the oldest Julia supported, and the newest stable release
         include:
           - os: ubuntu-latest
             python: "3.11"                 # the oldest Python the chain needs (the regular expressions of gamsdata.py)
+            julia: "1.11"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,7 +30,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: julia-actions/setup-julia@v2
         with:
-          version: "1.11"
+          version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
       - name: setup (installs the Python and Julia environments and the TIMES source; no GAMS)
         run: python TIMES.py setup
@@ -40,10 +42,50 @@ jobs:
           "$PY" -m pytest -q times_pp/tests
       - name: the reference cases reproduce their GAMS result
         run: python .github/scripts/check_models.py
-      - name: a serial and a parallel build give the same matrix
+      - name: a serial, a parallel and a --wait build (a setting given on Julia's input) give the same matrix
         run: python .github/scripts/check_parallel.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: reports-${{ matrix.os }}-${{ matrix.python }}
+          name: reports-${{ matrix.os }}-${{ matrix.python }}-julia${{ matrix.julia }}
           path: runs/ci/*/report_*.*
+
+  # The package as a user installs it (pip install times-os): the wheel built from this tree, installed into a fresh
+  # environment, then from an empty folder times-os example and times-os run (the first run sets the package up:
+  # Julia installed when none is found, the Julia packages, the compiled workload), compared with DemoS_012's
+  # published result (expected.json), a second run, check; and nothing written in the environment's package folder.
+  package:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build the wheel
+        shell: bash
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist
+      - name: install it into a fresh environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/user"
+          PY="$RUNNER_TEMP/user/bin/python"; [ -x "$PY" ] || PY="$RUNNER_TEMP/user/Scripts/python.exe"
+          "$PY" -m pip install dist/*.whl
+          echo "USER_PY=$PY" >> "$GITHUB_ENV"
+      - name: example, first run (sets itself up), check, second run
+        shell: bash
+        run: python .github/scripts/check_package.py "$RUNNER_TEMP/work" --python "$USER_PY" --clean
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: package-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/work/package_check.json
+            ${{ runner.temp }}/work/setup.log
+            ${{ runner.temp }}/work/julia_packages.log
+            ${{ runner.temp }}/work/times-os-runs/demo/report_*.*

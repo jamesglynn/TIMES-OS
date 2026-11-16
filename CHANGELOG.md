@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.1.0 (November 2026): installing with pip (beta), a settings file for `run`, Julia 1.11 or newer
+
+#### Installing with pip (beta)
+
+TIMES-OS can also be installed as a Python package. In this release it is a beta feature, for users willing to
+help test it; cloning stays the way to install until a release makes it a regular feature. `times-os --version`,
+`times-os check` and the first setup say so, with where to send what you find (the repository's Issues, or
+times-os@kanors.com). Everything under the next two headings comes with a clone as well.
+
+- TIMES-OS is a Python package: `pip install times-os`, then `times-os example demo` and `times-os run demo` (`python
+  -m times_os` is the same command). The first run sets it up, once, and says so in one line; an upgrade is noticed
+  and the setup brought up to date. Installed, the code is only read; settings, the Julia environment and the compiled
+  workload go to a data folder (`%LOCALAPPDATA%\times-os`, `~/Library/Application Support/times-os`,
+  `~/.local/share/times-os`; `TIMES_DATA` for another) and results to `times-os-runs/<case>/` in the folder that holds
+  the run folder (one `times-os-runs` for several cases, in the lowest folder that holds them all), the same place
+  from wherever the run is started. New commands: `example`, `clean` and `--version`. Extras: `times-os[gdx]` (the
+  comparison with TIMES in GAMS, `--lp`, `--jacobian`) and `times-os[gurobi]`. A run says once a day when a newer
+  version is out (`TIMES_UPDATE_CHECK=0` turns it off). From a clone, `python TIMES.py` works as before
+  (`pyproject.toml`, `hatch_build.py`, `times_os/`, `TIMES.py`).
+- The data folder is marked as times-os's own (`times-os-data.txt`). `TIMES_DATA` must name a new or empty folder, or
+  one that times-os made; any other folder is refused before anything is written in it, and `clean` removes only a
+  marked folder (`times_os/__main__.py`, `TIMES.py`, `clean`).
+- One part of the data folder for each Python environment (`env-<code>`): its settings, Julia environment, compiled
+  workload and Segment Heap copy. Each environment is set up once; switching between them sets nothing up again, and
+  the setup of one never changes what a run of the other uses. `check` names the part in use (`TIMES.py`, `launched`).
+- One setup at a time. A second run that starts while the first sets up waits for it, with a line a minute, then runs
+  without a setup of its own. A stopped setup's lock is taken over, and the run says so (`TIMES.py`, `setup_lock`).
+- While the first setup works (from ten minutes on a fast machine to over an hour on a small one), the console shows a
+  line at least once a minute: the step, the minutes so far and what Julia is doing (`TIMES.py`, `setup_logged`).
+- A run folder directly under a drive is refused only where `times-os-runs` cannot be made there. With `--out`,
+  nothing is made or tried beside the run folder (`TIMES.py`, `installed_out`).
+
+#### Runs
+
+- Every run ends with the line `Output files available here: <folder>`: the case's result folder, or for several cases
+  the folder of their results and `summary.txt` (`TIMES.py`, `run`).
+- A settings file for the defaults of `run`: `times-os.toml` (TOML; the options' long names as keys), the nearest one
+  going up from the run folders, then the user's own in the home folder. The command line and the `TIMES_<name>`
+  settings win over it. A run names the files it read; an unknown key or a wrong value stops it before any work. New
+  command `config`: every option's value in force and where it comes from. `cases` is given on the command line only;
+  `TIMES_SETTINGS_FILES=0` reads no settings file (`TIMES.py`, `run_settings`, `config`).
+
+#### Setup and Julia
+
+- Fixed: on a tester's system, a run during the first setup stopped with an error of Julia's environment variables.
+  When the runner gives the Julia it has started a setting for the run (on a machine with less memory, or for
+  stochastic TIMES, among others), `times_eq/tools/run_case.jl` put it in Julia's environment as pieces of a split
+  line; it now gives Strings (`ENV[String(k)] = String(v)`). Found and corrected by Rocco De Miglio, with thanks. The
+  fault shows on Julia 1.10.0 on Windows (its cache of the environment takes String keys only); every newer Julia,
+  1.10.13 included, takes the pieces. The CI now starts Julia this way with a setting given, and runs on Julia 1.11
+  (the oldest supported) and on the newest stable release (`times_eq/tools/run_case.jl`; `.github/workflows/ci.yml`,
+  `.github/scripts/check_parallel.py`).
+- Setup takes a Julia of 1.11 or newer only. One older than that (the one on the PATH, say) was used before; it is now
+  passed by, with a line naming its version and the version needed, and the next Julia found is taken, or one is
+  installed beside it. `setup --julia` naming an older Julia stops with that line. `check` names an older Julia as
+  MISSING, and a run with one (saved by an earlier setup) says so at its start and goes on (`TIMES.py`, `find_julia`,
+  `old_julia_notice`).
+- Setup's Julia step has two hours. On a slow machine it can reach that limit while it still compiles; when the
+  packages are installed by then, it now says that it was stopped after two hours and that the rest is compiled when a
+  run needs it, and the setup goes on and finishes as after a completed step: the preprocessor's Julia kernels are on
+  (they were left off until another setup). "FAILED" is kept for a real failure (`TIMES.py`, `julia_step_ok`).
+- On macOS, setup can install a portable Julia when none is found (`TIMES.py`, `install_julia`).
+- A run or `verify` in a clone that was never set up says so in one line and stops, before anything is installed (it
+  went on with whatever Python ran it, installed the GDX packages there, and could end in an error of DuckDB).
+  `TIMES_SETUP_CHECK=0` lets it through (`TIMES.py`, `never_set_up`).
+- A run whose preprocessor would have a DuckDB the code cannot use (none, or 2 or newer) names it in one line at its
+  start, with what puts it right, and stops. `check` has a DuckDB line (`TIMES.py`, `duckdb_problem`).
+
+The model built is the same as in 1.0.4: each agrees with TIMES in GAMS.
+
 ## 1.0.4 (November 2026): WAVER, UC_TIME option -13, late revenues of decommissioning flows
 
 #### Model features

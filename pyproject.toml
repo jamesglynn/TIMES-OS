@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# The package times-os: pip install times-os, then times-os run <run folder> (or python -m times_os ...).
+# One pure-Python wheel for every system. It carries the runner and its code as they are in the repository, unchanged,
+# under times_os/_tree/ (put there by the build hook hatch_build.py), beside the launcher times_os/ (__init__.py,
+# __main__.py). Built from the public repository (python -m build --wheel, or pip wheel .). From a clone, pip install
+# -e .: the clone's own code runs, as it is edited, and its state goes to the data folder, as for any installed package.
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "times-os"
+version = "1.1.0"           # the release's version: written here by the export (scripts/publish_clone.ps1 -Version)
+description = "TIMES Open Stack: the TIMES energy system model without GAMS (DD files -> Python -> Julia/JuMP -> HiGHS -> Veda result files)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "KanORS-EMR" }]
+keywords = ["TIMES", "energy system model", "ETSAP", "linear programming", "JuMP", "HiGHS", "Veda"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "duckdb<2",          # DuckDB 2.0 stops the preprocessor (an unfinished result before register): pinned until the code is adapted
+    "pandas",
+    "numpy",
+]
+
+[project.optional-dependencies]
+# the comparison with TIMES in GAMS (--check, --gams run), --lp <a solver of your GAMS> and --jacobian: GDX files
+# (gamspy_base brings the GDX library and comes under the GAMS licence; no GAMS licence is needed to use it)
+gdx = ["gamsapi[transfer]", "gamspy_base"]
+# --gurobi: Gurobi through its Python interface (gurobipy of the version of your Gurobi licence)
+gurobi = ["gurobipy", "scipy"]
+
+[project.scripts]
+times-os = "times_os.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/kanors-emr/TIMES-OS"
+Repository = "https://github.com/kanors-emr/TIMES-OS"
+Changelog = "https://github.com/kanors-emr/TIMES-OS/blob/main/CHANGELOG.md"
+"User guide" = "https://github.com/kanors-emr/TIMES-OS/blob/main/docs/user-guide.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["times_os"]
+
+# the runner's tree (TIMES.py, times_pp, times_eq, times_rpt, models/DemoS_012) as times_os/_tree: hatch_build.py,
+# for the standard wheel only (an editable install runs the clone's own)
+[tool.hatch.build.targets.wheel.hooks.custom]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["pyproject.toml", "hatch_build.py", "README.md", "LICENSE", "times_os", "TIMES.py", "times_pp", "times_eq", "times_rpt", "models/DemoS_012"]

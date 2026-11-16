@@ -32,6 +32,12 @@ README has to say which version of TIMES in GAMS solves it.
 
 Pull requests are welcome and are read; whether one is merged is decided by KanORS-EMR.
 
+Work from a clone: `python TIMES.py setup` there makes the project's own environment and keeps all its state in the
+clone. `pip install -e .` in the clone installs it as the package instead: the clone's own code runs, as it is
+edited, and its state goes to the data folder, as for any installed package (see the
+[user guide](docs/user-guide.md#installing-with-pip-beta), a beta feature in this release); `python TIMES.py` in the same clone keeps its state in the clone. The package's own launcher is `times_os/`; the runner is `TIMES.py`
+either way.
+
 - **A change that alters the model generated** (anything under `times_pp/timespp/` or `times_eq/src/`) is merged
   only when KanORS-EMR has found it to agree with TIMES in GAMS. Say in the pull request which model and TIMES
   version you checked it on, with the verdict line of `python TIMES.py run <run folder> --check` (it needs GAMS and the

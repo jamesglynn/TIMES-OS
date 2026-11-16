@@ -6,7 +6,9 @@ For what TIMES-OS is, see the [README](../README.md); for how its agreement with
 
 ## Installing and running
 
-You need **Python 3.11 or newer**. `setup` installs the rest, Julia included (when none is found: on Windows through
+### From a clone
+
+You need **Python 3.11 or newer**. `setup` installs the rest, Julia included (when none of 1.11 or newer is found: on Windows through
 winget or the Microsoft Store; on any system as a portable copy from julialang.org). git is only for cloning; a ZIP
 download from GitHub works as well. Windows is the main platform; Linux works too.
 
@@ -36,6 +38,13 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
   Everything `setup` installs by default is open-source. The GDX packages (`requirements-gams.txt`: `gamsapi[transfer]`
   and `gamspy_base`, which comes under the GAMS licence) serve only the comparison with GAMS, `--lp` and `--jacobian`:
   `setup` installs them when it finds GAMS, or with `setup --gdx`.
+- A clone that has never been set up (no `.venv`, no `.julia_env`, no setup in `settings.json`) does not run:
+  `run` and `verify` say so in one line and stop before anything is installed or written. `TIMES_SETUP_CHECK=0`
+  lets them through, for an environment you look after yourself.
+- A run stops at its start, in one line, when the Python that runs the preprocessor has no DuckDB or one the code
+  cannot use (today 2 or newer; `requirements.txt` says `duckdb<2`), naming the version found and what puts it
+  right: `python TIMES.py setup` here; installed, `pip install --force-reinstall times-os`. `check` shows the
+  DuckDB in use.
 - **Stochastic models.** The equations of stochastic TIMES (`$SET STAGES YES`, `$SET SPINES YES`) compiled ahead
   are a package of their own in this repository (`times_eq/addons/TimesEqStochastic`), which `setup` compiles with
   the rest. Where it is missing or out of date (after a change in `times_eq/src`, or an update of the code without a
@@ -48,11 +57,97 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
   folder itself), as TIMES does, and everything else into its result folder.
 - When a folder holds several run files, give the one you want: `python TIMES.py run <run folder>/<run file>.run`. The
   `.run` may be left out when no folder has that name. The case takes the name of the run file, so each run file of a folder has its own result folder.
-- The result is `runs/<case>/report_<case>.txt`. **Its first line is the verdict.**
+- `python TIMES.py example <folder>` copies the example model, DemoS_012, into a new or empty folder and prints the
+  line that runs it.
+- The result is `runs/<case>/report_<case>.txt`; `--out <folder>` puts the results elsewhere. The last line of a
+  run is `Output files available here: <folder>`. **The report's first line is the verdict.**
 
 Give `run` a folder that holds several run folders and it does them all and adds `runs/summary.txt`, with a count of
 the unsupported features by the number of models that need each one. Several folders, run files, wildcards and a list file
 (`--cases cases.txt`: one per line, `#` comments) can be mixed.
+
+### Installing with pip (beta)
+
+TIMES-OS can also be installed as a Python package. In this release that is a beta feature, offered to those
+willing to help test it: if you are, we would be glad to hear how it goes. Until a release makes it a regular
+feature, the clone above is the way to install for everyone else.
+
+You need **Python 3.11 or newer**; TIMES-OS installs the rest, Julia included. Windows is the main platform; Linux
+and macOS work too.
+
+```
+pip install times-os
+times-os example demo
+times-os run demo
+```
+
+`python -m times_os` is the same command as `times-os` and always works, also where the `times-os` command is not on
+the PATH (on Windows a Python installed for one user often leaves its `Scripts` folder off it). Everywhere in this
+guide, `python TIMES.py <command>` (the form of a clone, above) is `times-os <command>` for an installed package:
+`run`, `check`, `verify` and `setup` take the same options.
+
+- `times-os example <folder>` copies the example model, DemoS_012, into a new or empty folder and prints the line that
+  runs it. `times-os --version` prints the version, the TIMES version it follows and Python's.
+- **The first run sets TIMES-OS up**, once. It says so in one line before it starts, with where its log is, then shows
+  its steps: Julia is installed when none of 1.11 or newer is found (an older one is left as it is; on Windows through winget or the Microsoft Store; on any system
+  as a portable copy from julialang.org, no administrator rights needed), the Julia packages are installed and
+  compiled ahead on the example model, and the example model is run as the test. It needs an internet connection,
+  about 8 GB of memory and some time: Julia compiles its packages, from ten minutes on a fast machine to over an
+  hour on a small one. While it works, the console shows its steps and, at least once a minute, a line with the
+  step, the minutes so far and what Julia is doing (the package it installs or compiles); the log has everything.
+  `times-os setup` does it beforehand, with all its output; `times-os check` (which also sets up first when no setup
+  is made) shows what is installed, where the code and the data folder are, and whether the setup is the one for
+  this version. A failed setup ends with the full path of its log.
+- **One setup at a time.** When two runs start together on a new installation, one makes the setup and the other
+  says that it waits for it, with a line a minute, then runs without a setup of its own. A setup that was stopped
+  (its process is gone, or it began more than 6 hours ago) does not block the next one: it is taken over, and the
+  run says so.
+- The code is in Python's package folder and is only read there. What TIMES-OS makes for itself (its settings, the
+  Julia environment and the compiled workload, a Julia it installs, on Windows the Segment Heap copy of Python, the
+  log of the setup, Python's compiled files of its code) is in its **data folder**:
+
+  | System | Data folder |
+  |---|---|
+  | Windows | `%LOCALAPPDATA%\times-os` (e.g. `C:\Users\<you>\AppData\Local\times-os`) |
+  | macOS | `~/Library/Application Support/times-os` |
+  | Linux | `$XDG_DATA_HOME/times-os`, by default `~/.local/share/times-os` |
+
+  `TIMES_DATA=<folder>` puts it elsewhere: a new or empty folder, or one that times-os made. TIMES-OS marks its data
+  folder with a file `times-os-data.txt`; a folder that holds other things and no such file is refused before
+  anything is written in it, and `times-os clean` never removes it. Julia's own packages and their compiled code are in Julia's package store
+  (`~/.julia`, or `JULIA_DEPOT_PATH`), shared with every Julia program.
+- **One part of the data folder for each Python environment.** Installed in two environments (two venvs, or a
+  venv and a conda environment), times-os keeps the settings, the Julia environment, the compiled workload and the
+  Segment Heap copy of each in a part of its own, `env-<code>` in the data folder (`environment.txt` there names
+  the Python and the code). Each environment is set up once, at its first run; going back and forth between them
+  sets nothing up again, and the setup of one never changes what a run of the other uses. A Julia that setup
+  installs, the TIMES source and the one-setup-at-a-time lock are shared. `times-os check` names the part in use.
+- The results go to `times-os-runs/<case>/` in the folder that holds the run folder (`C:\models\MyCase` gives
+  `C:\models\times-os-runs\MyCase\`), the same place wherever the command is run from, also from inside the
+  run folder (`times-os run .`). Several cases share one `times-os-runs`, in the lowest folder that holds every run
+  folder given (siblings: their parent; folders at different depths: the higher one's), with `summary.txt`; run
+  folders on different drives: beside the first. Where `times-os-runs` cannot be made or written there (a read-only
+  share; directly under a drive, where it often cannot be made), the run stops before any work and asks for
+  `--out <folder>`, which puts the results anywhere (and then nothing is made or tried beside the run folder). A folder there that this runner did not make is never replaced. The last line of a run is
+  `Output files available here: <folder>`. **The report's first line is the verdict.**
+- **Update:** `pip install -U times-os`. The next run sees the new version and brings the setup up to date first
+  (it says so; Julia compiles the new code once). Another Python environment has its own part of the data folder,
+  set up at its own first run.
+- **Remove:** `times-os clean` lists what is in the data folder (only one marked as times-os's) and how much, and
+  asks before removing it, with the parts of every environment
+  (`--yes`: it does not ask); Julia itself and Julia's package store are left, and it says where they are. Then
+  `pip uninstall times-os`. Your model folders and results are never touched.
+- **Extras.** The plain package is the open chain, all open-source. The comparison with TIMES in GAMS (`--check`,
+  `--gams run`), `--lp` and `--jacobian` read and write GDX files: `pip install "times-os[gdx]"` (`gamsapi[transfer]`
+  and `gamspy_base`, which comes under the GAMS licence). `--gurobi`: `pip install "times-os[gurobi]"
+  gurobipy==<the version of your Gurobi licence>`. A run that needs them and does not find them names that line.
+- About once a day a run asks PyPI for the latest version of `times-os` (nothing is sent but the request for the
+  package's public page; two seconds at most, nothing said without a network) and says so in one line at its end
+  when a newer one is out. `TIMES_UPDATE_CHECK=0` turns this off.
+- **Where it has run:** this release's package has been installed and run, first run and second, on Windows and
+  Linux on GitHub's runners and on a Windows workstation of KanORS-EMR; on macOS, an earlier version of it has.
+- **Tell us what you find**, whatever it is: in the repository's [Issues](https://github.com/kanors-emr/TIMES-OS/issues),
+  or by email to times-os@kanors.com. `times-os --version` and `times-os check` name both.
 
 ## The verdict
 
@@ -104,7 +199,8 @@ The three commands most runs need:
     python TIMES.py run <run folder>
 
 Builds the model of the run folder (its run file and DD files, as Veda writes them) and solves it with HiGHS, all on
-open-source software. The results go to `runs/<case>/`: `solution.db3`, the Veda result files and the run report.
+open-source software. The results go to `runs/<case>/` (installed with pip: `times-os-runs/<case>/` beside the run
+folder): `solution.db3`, the Veda result files and the run report.
 When the run folder holds a published result (`expected.json`) or a GAMS listing, the objective is compared with it
 and the report gives the verdict. GAMS is not needed.
 
@@ -163,6 +259,35 @@ on input flows. The environment variable `TIMES_REDUCE=NO` builds the unreduced 
 allows for `--lp` (found by solving a small LP of 6,000 rows with each solver, a few seconds, then kept in `settings.json`
 for that GAMS installation and licence file). `--lp` with a solver the licence does not have stops before the model
 is built, and says which ones it has.
+
+### A settings file for the options of `run`: `times-os.toml`
+
+Options that you give to every run can be written once in a settings file, `times-os.toml` (TOML). Its keys are the
+long names of `run`'s options without the dashes. A switch is `true` or `false`, a repeated option is a list, and a
+relative path is taken from the file's folder:
+
+```toml
+# times-os.toml, in C:\models (beside the run folders) or in your home folder
+out = "D:/results"              # --out D:/results
+threads = 8                     # --threads 8
+time-limit = 3600               # --time-limit 3600
+keep = true                     # --keep
+solver-option = ["lpmethod=4"]  # --solver-option lpmethod=4, repeated for each item
+```
+
+- **Where it is read:** first the nearest `times-os.toml` going up from the folder that holds the run folder (for
+  several cases, from their common folder) to the drive's root; then your own, `times-os.toml` in your home folder.
+  A key in the nearest file wins over the same key in yours.
+- **What wins:** the command line, then a `TIMES_<name>` setting (`TIMES_POINTS`, `TIMES_GAMS`), then the nearest
+  file, then yours, then the built-in default.
+- A run names the files it read in one line at its start, and in its report. An unknown key, or a value of the wrong
+  kind, stops the run before any work, naming the file and the key.
+- `times-os config [<run folder>]` (from a clone: `python TIMES.py config`) prints every option with the value in force
+  and where it comes from, and the two places it looks.
+- `cases` is given on the command line only: in a file it would add its cases to every run, so a file with it is
+  refused like an unknown key.
+- With no `times-os.toml` anywhere, nothing changes. Setup's own test of the example reads none, and
+  `TIMES_SETTINGS_FILES=0` turns the files off for every run (a check that must not depend on them sets it).
 
 ## Runs that read an earlier run: elastic demands, FIXBOH, LPOINT
 
@@ -253,6 +378,7 @@ process, the investment costs of `S_NCAP_COST` in the cost results, several SOWs
 | Folder | |
 |---|---|
 | `TIMES.py` | The one command: `setup`, `check`, `run`, `verify`. |
+| `times_os` | The package's launcher: the `times-os` command and `python -m times_os` run `TIMES.py`; installed by pip, the tree above is in the package (`times_os/_tree`) and is only read. |
 | [`times_pp`](../times_pp/README.md) | The TIMES v4.9.8 preprocessor in Python on DuckDB, with Julia kernels for its heaviest steps: interpolation, timeslice levelling, capacity transfer and cost coefficients, objective coefficients, bounds. Output: the sets and parameters of the model, one table each. |
 | [`times_eq`](../times_eq/README.md) | The TIMES equations in Julia/JuMP, built from those tables. One file per equation family, the algebra in its docstring. |
 | [`times_rpt`](../times_rpt/README.md) | The TIMES report writer in Python: the report parameters and the Veda result files. |

@@ -330,7 +330,9 @@ include("runcase.jl")
 # solution that writes the model's matrix, as a run with --gams and --check does). precompile/WORKLOAD.txt says which (mode: full, or dev for `setup --dev`:
 # the empty model only) and is a dependency: when its text changes, Julia compiles the package again. The whole
 # case runs whenever model.db3 is there, unless the file says dev (a file of an older setup has no mode line).
-const WORKLOAD_DIR = joinpath(dirname(@__DIR__), "precompile")
+# (TIMESEQ_WORKLOAD: another folder for it, where the package folder is not to be written: times-os installed by pip
+# puts it in its data folder)
+const WORKLOAD_DIR = get(ENV, "TIMESEQ_WORKLOAD", joinpath(dirname(@__DIR__), "precompile"))
 const WORKLOAD_TXT = joinpath(WORKLOAD_DIR, "WORKLOAD.txt")
 isfile(WORKLOAD_TXT) && include_dependency(WORKLOAD_TXT)
 const WHOLE_CASE = !(isfile(WORKLOAD_TXT) && occursin(r"(?m)^mode: dev", read(WORKLOAD_TXT, String)))

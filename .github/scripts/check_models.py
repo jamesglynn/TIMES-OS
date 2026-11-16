@@ -11,6 +11,7 @@ objective). Every case that solved must have its Veda result files, exit status 
 Exit status 1 otherwise.
 """
 import json, os, shutil, subprocess, sys
+os.environ["TIMES_SETTINGS_FILES"] = "0"      # the runs started here read no times-os.toml: a stray one cannot change a check
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 lst = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "models", "ci_models.txt")
