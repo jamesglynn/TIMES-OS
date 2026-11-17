@@ -48,13 +48,17 @@ python TIMES.py run <run folder>
   copies the example model, DemoS_012, into a new folder `demo`, to try it with `python TIMES.py run demo`.
 - The result is `runs/<case>/report_<case>.txt`; `--out <folder>` puts the results elsewhere. The last line of a run
   is `Output files available here: <folder>`. **The report's first line is the verdict**: `SOLVED`, `UNSUPPORTED`
-  (with the list of what is missing), `NOT SOLVED`, `INFEASIBLE` or `ERROR`.
+  (with the list of what is missing), `NOT SOLVED`, `INFEASIBLE` or `ERROR`. A block TIME AND MEMORY follows the
+  opening lines: the time to the solver and the peak memory, and, when the run ran GAMS, GAMS's and the ratio.
 - Options you give to every run can go in a settings file, `times-os.toml`, beside your run folders or in your home
   folder (`python TIMES.py config` shows what is in force); see the [user guide](https://github.com/kanors-emr/TIMES-OS/blob/main/docs/user-guide.md#a-settings-file-for-the-options-of-run-times-ostoml).
 - Every commit on `main` is a release, checked against TIMES in GAMS before it is published, on a set of cases that
   uses every feature of the open reference models, including at least one large model (all of them are checked every
   month): take `main` or a tagged release, with nothing to build or check yourself. With GAMS on the machine (`setup` then fetches the TIMES source),
   `--check` makes the same comparison on your own model ([verification](https://github.com/kanors-emr/TIMES-OS/blob/main/docs/verification.md)).
+  The comparison has been run with GAMS 54.1.0; with an older GAMS, `check` and a run with `--check` say so in one
+  line, and the run goes on. A run uses GAMS only when asked (`--check`, `--gams run` or `reuse`, `verify`): a GAMS
+  listing in the run folder is compared with only with `--gams reuse`.
 
 Everything else (options, results, the extensions, runs that read an earlier run) is in the
 [user guide](https://github.com/kanors-emr/TIMES-OS/blob/main/docs/user-guide.md).

@@ -158,8 +158,8 @@ guide, `python TIMES.py <command>` (the form of a clone, above) is `times-os <co
 | `NOT SOLVED` | The model was built and not solved (`--no-solve`, or above `--max-solve-rows`), or the solver did not reach an optimum (time limit, or a failure of the solver). | 1 |
 | `ERROR` | A step failed; the message is in the report. | 1 |
 | `INFEASIBLE` | The model's data cannot be met: rows are left with no column and a constant that does not satisfy them (`0 = 2.685`, a demand nothing can supply), on which TIMES in GAMS stops too ("equation infeasible due to rhs value"). All of them are listed in `julia.log`. Not a defect. | 5 |
-| `SAME` | The model was compared with TIMES in GAMS and agrees: with `--check`, its matrix entry by entry; for a model with a published result (`models/`, the open reference models), with that result (`SAME OBJECTIVE` when only the objective is compared, as with `--gams run` or a GAMS listing in the run folder). | 0 |
-| `DIFFERENT` | The model was compared with TIMES in GAMS and does not agree (`DIFFERENT OBJECTIVE` when only the objectives were compared). A defect; please report it. | 1 |
+| `SAME` | The model was compared with TIMES in GAMS and agrees: with `--check`, its matrix entry by entry; for a model with a published result (`models/`, the open reference models), with that result (`SAME OBJECTIVE` when only the objective is compared, as with `--gams run`, or `--gams reuse` and a GAMS listing in the run folder). | 0 |
+| `DIFFERENT` | The model was compared with TIMES in GAMS and does not agree (`DIFFERENT OBJECTIVE` when only the objectives were compared). A defect; please report it. What differs follows, with the counts (`DIFFERENT: 32 column bounds (check 4)`). It is the verdict whenever a comparison differs, also when the run was not solved or GAMS only wrote its matrix; that comes after it (`; not solved here (...)`). | 1 |
 
 When a run is solved but its result files (the Veda files, or the results later runs read) could not be written, the
 report's second line says `NOT WRITTEN` and what, and the exit status is 4 (unless a verdict above gives 1, 3 or 5).
@@ -183,8 +183,8 @@ done, with exit status 2.
 
 | File | |
 |---|---|
-| `report_<case>.txt` | The verdict, the unsupported features or the differences, the input files with their hashes, the versions of everything. Complete in itself. |
-| `report_<case>.json` | The same for a program. |
+| `report_<case>.txt` | The verdict; TIME AND MEMORY (the time to the solver and the peak memory, and when the run ran GAMS, GAMS's and the ratio); the unsupported features or the differences, the input files with their hashes, the versions of everything. Complete in itself. |
+| `report_<case>.json` | The same for a program (TIME AND MEMORY under `against_gams`). |
 | `preprocess.log`, `preprocess.json` | The preprocessor, and its result with every switch of the run file. |
 | `solution.db3` | Levels and marginals of every variable and equation. |
 | `julia.log`, `highs.log` | The model build; the solver log. |
@@ -201,8 +201,10 @@ The three commands most runs need:
 Builds the model of the run folder (its run file and DD files, as Veda writes them) and solves it with HiGHS, all on
 open-source software. The results go to `runs/<case>/` (installed with pip: `times-os-runs/<case>/` beside the run
 folder): `solution.db3`, the Veda result files and the run report.
-When the run folder holds a published result (`expected.json`) or a GAMS listing, the objective is compared with it
-and the report gives the verdict. GAMS is not needed.
+When the run folder holds a published result (`expected.json`), the objective is compared with it and the report
+gives the verdict. GAMS is not needed. A run uses GAMS only when you ask for it (`--check`, `--gams run` or `reuse`,
+`verify`, or the same in `times-os.toml`): otherwise no GAMS is started and no GAMS result in the run folder is read.
+A GAMS listing there (as Veda leaves it) is compared with only with `--gams reuse`; the verdict says when one is there.
 
     python TIMES.py run <run folder> --no-solve --check
 
@@ -226,7 +228,7 @@ All the options:
 |---|---|
 | `--out <folder>` | Where the results go. Default: `runs/` in this folder. |
 | `--check` | Compare the model with TIMES in GAMS entry by entry: GAMS writes its matrix with CONVERT, and the two are compared after the run (see [verification](verification.md)). Needs GAMS and the TIMES source: without them the run stops before anything is done (exit status 2). `python TIMES.py verify <result folder>` compares a finished case again. |
-| `--gams reference\|run\|reuse\|skip` | What the result is compared with. `reference`: the published result in the run folder (`expected.json`; the default when it is there). `run`: TIMES in GAMS, run now, solved, its objective compared. `reuse`: the GAMS listing already in the run folder (the default when there is one). `skip`: nothing. |
+| `--gams reference\|run\|reuse\|skip` | What the result is compared with. `reference`: the published result in the run folder (`expected.json`; the default when it is there). `run`: TIMES in GAMS, run now, solved, its objective compared. `reuse`: the GAMS listing already in the run folder (only when given). `skip`: nothing (the default, unless `--check` or a published result). |
 | `--times <folder>` | The TIMES source folder for this run's GAMS comparison (default: the one `setup` recorded or found). |
 | `--solver auto\|simplex\|ipm\|hipo\|ipx` | HiGHS method. `auto` uses the simplex, and above 150,000 rows the interior point code `ipx` without crossover. `ipm` or `hipo` is the newer, parallel interior point code of HiGHS (HiPO); if it fails, `ipx` is tried. |
 | `--time-limit <seconds>` | Limit for the HiGHS solve (default 3600). |
@@ -234,7 +236,7 @@ All the options:
 | `--points <folder>` | Where the results of an earlier run are (`LPOINT`, `FIXBOH`, `TIMESED`) when they are not where TIMES looks: its result folder or its run folder; repeated as needed (`TIMES_POINTS`: folders separated by `;`). See "Runs that read an earlier run". |
 | `--threads <n>` | Threads HiGHS may use (default: its own choice). |
 | `--highs-option <name=value>` | Any HiGHS option, repeated as needed; applied last (e.g. `run_crossover=on`). |
-| `--no-solve` | Build the model and solve nothing: sizes and times. When GAMS and the TIMES source are found, GAMS runs to its solver and stops there, and the sizes are compared (with `--check`, the matrices). |
+| `--no-solve` | Build the model and solve nothing: sizes and times, without GAMS. With `--check` (or `--gams run`), GAMS runs to its solver and stops there, and the sizes are compared (with `--check`, the matrices). |
 | `--solve`, `--max-solve-rows <n>` | Above `--max-solve-rows` (default 2,000,000 rows) the model is built and not solved, unless `--solve`. |
 | `--no-report` | No Veda result files. |
 | `--keep` | Keep the model's tables (`model_parquet/`, `model.tjb`) and the copy of the run folder. |

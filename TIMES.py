@@ -51,7 +51,7 @@ setup   creates .venv and installs the Python packages there, installs the Julia
                instead of 5), and every run compiles the rest (about 1.5 minutes more per run).  setup without --dev
                goes back to the whole case.
 check   says what is installed and what is missing, and the LP solvers the licence of your GAMS allows (for --lp;
-        found once, in a few seconds, and kept in settings.json for that GAMS).
+        listed by setup, in a few seconds, and kept in settings.json for that GAMS; check does not start GAMS).
 run     a list of cases (run folders: the run file and the DD files of one model, as Veda writes them), one after the other:
           0. reads the model with the Python preprocessor and lists every input not supported yet,
           1. builds the model in Julia and solves it with HiGHS,
@@ -60,6 +60,9 @@ run     a list of cases (run folders: the run file and the DD files of one model
           3. with --gams run or --check: runs TIMES in GAMS on a copy of the same run file, with the same REDUCE,
           4. writes <output>/<case>/report_<case>.txt (verdict in the first line) and report_<case>.json, and
              <output>/summary.txt for more than one case.
+        A run uses GAMS only when you ask for it (--check, --gams run or reuse, verify, or the same in times-os.toml):
+        without them no GAMS is started and no GAMS result in the run folder is read.  A GAMS listing there (as Veda
+        leaves it) is compared with only with --gams reuse; the verdict says when one is there.
         A published reference (expected.json in the run folder, as in models/) is compared with: the objective, the
         size of the model, and the GAMS solution or matrix when they are published beside it.
         A myopic run (TIMESTEP in the run file) is solved step by step, as TIMES does.
@@ -78,8 +81,8 @@ The comparison with TIMES in GAMS (needs GAMS, its licence for the size of the m
         columns by their names (every coefficient, right-hand side and bound).  The verdict, in the first line of
         the report: SAME, or DIFFERENT with the equations and variables that differ.  With several cases, the matrices are compared after every case has
         run (Ctrl+C stops the comparisons and keeps the runs).  --gams run instead solves the model in GAMS as well and
-        compares the objectives; a GAMS listing already in the run folder (as Veda leaves it) is compared with in the
-        same way, without running GAMS.  Without GAMS or the TIMES source, --check stops before anything is run.
+        compares the objectives; --gams reuse compares with a GAMS listing already in the run folder (as Veda leaves
+        it) in the same way, without running GAMS.  Without GAMS or the TIMES source, --check stops before anything is run.
 verify  the matrix comparison of --check on finished cases: a result folder of one case (<output>/<case>), or a folder
         of them (its summary.txt is updated).  The case needs its tables and work/ (kept by a run with --check until it
         has passed).  --keep: keep the tables after a passed check.
@@ -107,7 +110,7 @@ options of run:
                             reference: compare with the published GAMS result in the folder (expected.json, and
                             gams_solution.db3 / gams_matrix.db3 when present; the default when expected.json is there);
                             run: run TIMES in GAMS now and compare; reuse: compare with a GAMS listing already in the
-                            run folder (the default when there is one); skip: no comparison
+                            run folder; skip: no comparison (the default, unless --check or a published reference)
     --times <folder>        the TIMES source folder for this run (default: the one setup found)
     --solver auto|simplex|ipm|hipo|ipx   HiGHS method (auto: simplex, and the interior point code ipx above 150,000 rows;
                             ipm or hipo: the newer, parallel interior point code HiPO, with ipx as the fallback)
@@ -152,8 +155,8 @@ options of run:
                             TIMES_TABLES=db3 writes model.db3 instead); with --keep it stays.
                             TIMES_DROP=1: the preprocessor also drops each table once written and no longer read
                             (less memory after its peak; off by default)
-    --no-solve              solve nothing: the model is built (and, when GAMS and the TIMES source are found, GAMS runs
-                            to its solver and stops there: the sizes are compared; with --check the matrices too)
+    --no-solve              solve nothing: the model is built, without GAMS.  With --check (or --gams run), GAMS runs to
+                            its solver and stops there: the sizes are compared, and with --check the matrices too
     --solve                 solve with HiGHS whatever the size (by default a model above --max-solve-rows is only built)
     --max-solve-rows <n>    the size above which HiGHS is not tried (default 2,000,000 rows)
     --cases <file>          the cases listed in a file, one run folder per line (see above)
@@ -339,15 +342,24 @@ def make_segheap():
         write(os.path.join(SEGHEAP, "pyvenv.cfg"), f"home = {home}\ninclude-system-site-packages = false\nversion = {platform.python_version()}\nexecutable = {base}\n")
         sp = os.path.join(SEGHEAP, "Lib", "site-packages")
         os.makedirs(sp)
+        # A conda Python (Miniforge, Miniconda, Anaconda) keeps the DLLs its extension modules need (libffi for
+        # _ctypes, and others) in <its folder>\Library\bin, and finds them from the place of its own python.exe; the
+        # copy is elsewhere, so the .pth gives it that folder (os.add_dll_directory needs no ctypes), before any
+        # package is imported, in the copy and in its worker processes. Another Python has no such folder: the .pth
+        # is as before.
+        dlls = [d for d in (os.path.join(home, "Library", "bin"),) if os.path.isdir(d)]
+        add_dlls = "".join(f"os.add_dll_directory({d!r}); " for d in dlls)
+        if dlls:
+            rec["dll_directories"] = dlls
         # .venv's packages (its .pth files too), found from the copy's own place; and sys._base_executable: without it
         # multiprocessing starts the DD reader's workers in the base interpreter, on the NT heap (bpo-35797)
         if INSTALLED:   # installed by pip: the packages of the Python that runs times-os (a venv's, or the user's own)
             import site
             dirs = [d for d in site.getsitepackages() + ([site.getusersitepackages()] if site.ENABLE_USER_SITE else []) if os.path.isdir(d)]
-            write(os.path.join(sp, "times_segheap.pth"), "import site, sys; " + "".join(f"site.addsitedir({d!r}); " for d in dirs)
-                  + "sys._base_executable = sys.executable\n")
+            write(os.path.join(sp, "times_segheap.pth"), ("import os, site, sys; " if dlls else "import site, sys; ") + add_dlls
+                  + "".join(f"site.addsitedir({d!r}); " for d in dirs) + "sys._base_executable = sys.executable\n")
         else:
-            write(os.path.join(sp, "times_segheap.pth"), "import os, site, sys; site.addsitedir(os.path.join(os.path.dirname(sys.prefix), 'Lib', 'site-packages')); "
+            write(os.path.join(sp, "times_segheap.pth"), "import os, site, sys; " + add_dlls + "site.addsitedir(os.path.join(os.path.dirname(sys.prefix), 'Lib', 'site-packages')); "
                                                         "sys._base_executable = sys.executable\n")
         code, out, _ = call([exe, os.path.join(ROOT, "times_pp", "timespp", "winheap.py"), "selftest"], timeout=600)
         try:
@@ -372,6 +384,30 @@ def make_segheap():
     return rec
 
 
+SEGHEAP_CAUSES = ((r"DLL load failed", "a DLL of its Python not found"),
+                  (r"does not let a program ask for the Segment Heap", "Windows too old"),
+                  (r"was made from was not found", "its base Python not found"),
+                  (r"WinError (5|1920|4551)\b|[Aa]ccess is denied|blocked", "Windows did not let it run"),
+                  (r"not on the Segment Heap", "Windows ignored its manifest"),
+                  (r"DuckDB does not import", "DuckDB does not import in it"))
+
+
+def segheap_cause(why):
+    """Why the Segment Heap copy was not made, in a few words (the full reason is in settings.json, segment_heap)."""
+    return next((words for pat, words in SEGHEAP_CAUSES if re.search(pat, why or "")), "its self-test failed")
+
+
+def segheap_not_made(why):
+    """setup's line when the copy was not made: one line, at most 160 characters."""
+    return (f"   NOT made ({segheap_cause(why)}; the reason is in settings.json): the preprocessor runs on Windows's default "
+            "heap, about half as fast")
+
+
+def heap_at_run(case, heap):
+    """The line at the start of a run whose preprocessor is not on the Segment Heap."""
+    return f"[{case}] {heap}; the preprocessor runs about half as fast, the run goes on"
+
+
 def pp_python():
     """The interpreter for the preprocessor and the report writer: on Windows the Segment Heap copy, when setup made it
     and it passed its check and the base Python is still the same version; else this one. TIMES_SEGHEAP=0 (or
@@ -387,7 +423,7 @@ def pp_python():
     if h.get("status") == "off":
         return sys.executable, f"NT heap: the Segment Heap copy is switched off ({h.get('why')}; {PROG} setup makes it)"
     if h.get("status") != "ok":
-        return sys.executable, f"NT heap: the Segment Heap copy could not be made at setup ({h.get('why')})"
+        return sys.executable, f"NT heap: no Segment Heap copy ({segheap_cause(h.get('why'))})"
     if not exe or not os.path.isfile(exe):
         return sys.executable, f"NT heap: the Segment Heap copy is missing ({PROG} setup makes it again)"
     if h.get("version") != platform.python_version():
@@ -729,6 +765,16 @@ def gams_for_lp(given=None):
 
 
 
+def gams_lp_kept(gams):
+    """The list of gams_lp_solvers kept in settings.json for this GAMS (its path, version and licence date), without
+    starting GAMS; None when none is kept for it."""
+    sysdir = os.path.dirname(gams)
+    lic = os.path.join(sysdir, "gamslice.txt")
+    key = {"gams": gams, "version": gams_version(gams), "licence_time": int(os.path.getmtime(lic)) if os.path.isfile(lic) else None}
+    old = settings().get("gams_lp") or {}
+    return old if "licensed" in old and all(old.get(k) == v for k, v in key.items()) else None
+
+
 def gams_lp_solvers(gams, fresh=False):
     """The version of the GAMS at `gams` and the LP solvers its licence allows: one GAMS run solves a small LP of 6,000
     rows and columns (larger than GAMS's demo and community limits, so a solver that is not licensed refuses it)
@@ -893,7 +939,8 @@ def install_julia_portable():
 
 
 def find_gams(given=None):
-    cands = [given, locate(settings().get("gams")), shutil.which("gams")]
+    """The GAMS executable: given (setup --gams), TIMES_GAMS, settings.json "gams", the PATH, the usual folders."""
+    cands = [given, os.environ.get("TIMES_GAMS"), locate(settings().get("gams")), shutil.which("gams")]
     if WIN:
         for pat in (r"C:\GAMS\*\gams.exe", r"C:\GAMS\*\*\gams.exe", r"C:\Program Files\GAMS*\gams.exe", r"C:\Program Files\GAMS\*\gams.exe"):
             cands += sorted(glob.glob(pat), reverse=True)
@@ -905,6 +952,29 @@ def find_gams(given=None):
         if c and os.path.isfile(c):
             return os.path.abspath(c)
     return None
+
+
+GAMS_COMPARED = ("54.1.0", "54.1.0")    # the oldest and the newest GAMS the comparison with TIMES in GAMS has been run with
+
+
+def gams_version(gams):
+    """The version of the GAMS at `gams`, from gamsstmp.txt in its folder (GAMS is not started); None when not found."""
+    stamp = os.path.join(os.path.dirname(gams), "gamsstmp.txt") if gams else ""
+    try:
+        m = re.search(r"\b(\d+\.\d+\.\d+)\b", read(stamp)) if os.path.isfile(stamp) else None
+    except OSError:
+        m = None
+    return m.group(1) if m else None
+
+
+def gams_older_note(gams):
+    """One line when the GAMS at `gams` is older than the oldest the comparison has been run with; else ""."""
+    v = gams_version(gams)
+    num = lambda s: tuple(int(x) for x in s.split("."))
+    if not v or num(v) >= num(GAMS_COMPARED[0]):
+        return ""
+    return (f"GAMS {v} is older than {GAMS_COMPARED[0]}, the oldest GAMS the comparison has been run with: "
+            "it is used, and a difference may come from GAMS")
 
 
 def times_version(folder):
@@ -1158,14 +1228,16 @@ def check(verbose=True):
                   f"Julia {(os.environ.get('JULIA_NUM_THREADS') or 'auto') + ' (' + str(cpus) + ' processors)'}, "
                   f"garbage collector {os.environ.get('JULIA_NUM_GC_THREADS') or max(1, min(12, cpus // 2))}, "
                   f"at most {os.environ.get('TIMESEQ_PAR_WORKERS') or 8} equation families at once (4 when memory is short)"))
+    gams, lp_gams = find_gams(), gams_for_lp()
     gdx_err = gdx_library() if "gams.transfer" in found else ""
     gdx = "gams.transfer" in found and not gdx_err
     gdx_why = (f"  -> the GDX library does not load: {gdx_err}" if gdx_err else
                f"not installed: needed only for the comparison with TIMES in GAMS, --lp and --jacobian  -> "
                + ("pip install \"times-os[gdx]\"" if INSTALLED else f"run: {PROG} setup --gdx"))
-    lines.append(("ok" if gdx else "NOTE", "Python packages (GDX: the comparison with GAMS, --lp, --jacobian)", ", ".join(f"{k} {v}" for k, v in found.items() if k in ("gams.transfer", "gamspy_base"))
-                  + ("" if gdx else gdx_why)
-                  + ("" if "gamspy_base" in found or not gdx else "  (gamspy_base not installed: the GDX library of the GAMS installation is used)")))
+    if gams or lp_gams:     # without GAMS: one line about it, below
+        lines.append(("ok" if gdx else "NOTE", "Python packages (GDX: the comparison with GAMS, --lp, --jacobian)", ", ".join(f"{k} {v}" for k, v in found.items() if k in ("gams.transfer", "gamspy_base"))
+                      + ("" if gdx else gdx_why)
+                      + ("" if "gamspy_base" in found or not gdx else "  (gamspy_base not installed: the GDX library of the GAMS installation is used)")))
     julia = find_julia()
     if julia:
         _, out, _ = call([julia, "--version"], timeout=120)
@@ -1196,25 +1268,28 @@ def check(verbose=True):
         chain = False
         lines.append(("MISSING", "Julia", f"not found  -> run: {PROG} setup   (it installs Julia: winget's Juliaup, the Microsoft Store's "
                       "Julia, or a portable copy into .julia_bin; or give the place of your own: setup --julia <julia executable>)"))
-    src = find_times()
-    if src:
-        v = times_version(src)
-        lines.append(("ok" if v == PORT_VERSION else "NOTE", "TIMES source", f"v{v} ({src})" + ("" if v == PORT_VERSION else f"  -> this implementation follows v{PORT_VERSION}; results can differ with another version")))
-    else:   # the open chain carries the TIMES declarations it reads (times_pp/timespp/times_src): the source is for GAMS only
-        lines.append(("NOTE", "TIMES source", f"not found  -> needed only to run GAMS for the comparison: git clone --branch v{PORT_VERSION} --depth 1 {TIMES_REPO} \"{os.path.join(STATE, 'TIMES_model-v' + PORT_VERSION)}\"   "
-                      "(or give its place: setup --times <folder with initsys.mod>)"))
-    gams = find_gams()
     gams_ok = bool(gams) and gdx
-    lines.append(("ok" if gams else "NOTE", "GAMS", gams or "not found  -> needed only for the comparison with TIMES in GAMS (run --check); give its place with: setup --gams <gams executable>"))
-    lp_gams = gams_for_lp()
-    if lp_gams:
-        a = gams_lp_solvers(lp_gams)
-        lines.append(("ok" if a.get("licensed") else "NOTE", "GAMS for --lp <solver>",
-                      f"GAMS {a.get('version') or '(version not found)'} ({lp_gams}); "
-                      + ("LP solvers of its licence: " + ", ".join(a["licensed"]) if a.get("licensed") else
-                         f"its LP solvers could not be listed: {a['error']}" if a.get("error") else "no LP solver licensed for models of this size")))
+    if not gams and not lp_gams:        # no GAMS: one line; the open chain needs none
+        lines.append(("ok", "GAMS", f"not found: the open chain needs none (with GAMS elsewhere: {PROG} setup --gams <gams executable>)"))
     else:
-        lines.append(("NOTE", "GAMS for --lp <solver>", "not found: needed only to solve with a solver of your GAMS (HiGHS, the default, needs nothing)"))
+        src = find_times()
+        if src:
+            v = times_version(src)
+            lines.append(("ok" if v == PORT_VERSION else "NOTE", "TIMES source", f"v{v} ({src})" + ("" if v == PORT_VERSION else f"  -> this implementation follows v{PORT_VERSION}; results can differ with another version")))
+        else:   # the open chain carries the TIMES declarations it reads (times_pp/timespp/times_src): the source is for GAMS only
+            lines.append(("NOTE", "TIMES source", f"not found  -> needed only to run GAMS for the comparison: git clone --branch v{PORT_VERSION} --depth 1 {TIMES_REPO} \"{os.path.join(STATE, 'TIMES_model-v' + PORT_VERSION)}\"   "
+                          "(or give its place: setup --times <folder with initsys.mod>)"))
+        lines.append(("ok" if gams else "NOTE", "GAMS", gams or "not found  -> needed only for the comparison with TIMES in GAMS (run --check); give its place with: setup --gams <gams executable>"))
+        if gams and gams_older_note(gams):
+            lines.append(("NOTE", "GAMS version", gams_older_note(gams)))
+        if lp_gams:     # the list kept by setup: check never starts GAMS
+            a = gams_lp_kept(lp_gams)
+            lines.append(("ok" if a and a.get("licensed") else "NOTE", "GAMS for --lp <solver>",
+                          f"GAMS {(a or {}).get('version') or gams_version(lp_gams) or '(version not found)'} ({lp_gams}); "
+                          + (f"its LP solvers are not listed yet  -> run: {PROG} setup (one short GAMS run lists them)" if a is None else
+                             "LP solvers of its licence: " + ", ".join(a["licensed"]) if a.get("licensed") else "no LP solver licensed for models of this size")))
+        else:
+            lines.append(("NOTE", "GAMS for --lp <solver>", "not found: needed only to solve with a solver of your GAMS (HiGHS, the default, needs nothing)"))
     g_ver, g_home = find_gurobi()
     have, sci = package_version("gurobipy"), package_version("scipy")
     if INSTALLED and not (have and sci and (not g_ver or g_ver == have)):   # installed by pip: the package's extra brings them
@@ -1247,7 +1322,8 @@ def check(verbose=True):
         if INSTALLED:
             print(f"  {BETA}\n")
         print("  The open chain (DD files -> Python -> Julia -> HiGHS) " + ("is ready." if chain else "is NOT ready: see MISSING above."))
-        print("  The comparison with GAMS " + ("is ready." if chain and gams_ok else "is NOT ready." if chain else "needs the chain first."))
+        if gams or lp_gams:             # (without GAMS its one line above says it all)
+            print("  The comparison with GAMS " + ("is ready." if chain and gams_ok else "is NOT ready." if chain else "needs the chain first."))
     return chain, chain and gams_ok, lines
 
 
@@ -1593,9 +1669,7 @@ def setup(args):
                   " GAMS, --lp and --jacobian ...")
             code, out, t = call([sys.executable, "-m", "pip", "install", "-r", os.path.join(ROOT, "requirements-gams.txt")])
             print("   " + ("done" if code == 0 else "FAILED:\n" + out[-2000:]) + f"  ({t:.0f} s)")
-        else:
-            print("   GAMS not found: the GDX packages (requirements-gams.txt) are not installed; they serve only the comparison"
-                  " with TIMES in GAMS, --lp and --jacobian (setup --gdx installs them)")
+        # (without GAMS nothing is said about it here: check's one line below says it)
         # --gurobi: gurobipy of the version of the Gurobi found here (a Gurobi licence is for one version), and scipy
         g_ver, g_home = (opt("--gurobi"), None) if opt("--gurobi") else find_gurobi()
         if not g_ver:
@@ -1621,9 +1695,12 @@ def setup(args):
         print(f"   the preprocessor's interpreter on the Segment Heap ({for_settings(SEGHEAP)}) ...")
         s["segment_heap"] = make_segheap()
         write(SETTINGS, json.dumps(s, indent=1))
-        print("   " + (("done: the preprocessor runs on the Segment Heap" + (f" ({s['segment_heap']['how']})" if s["segment_heap"].get("how") else ""))
-                     if s["segment_heap"]["status"] == "ok" else
-                     f"NOT made ({s['segment_heap']['why']}): the preprocessor runs on Windows's default heap, about half as fast"))
+        if s["segment_heap"]["status"] == "ok":
+            print("   done: the preprocessor runs on the Segment Heap" + (f" ({s['segment_heap']['how']})" if s["segment_heap"].get("how") else ""))
+        else:
+            print(segheap_not_made(s["segment_heap"]["why"]))
+            if isinstance(sys.stdout, _Tee):       # installed: the full reason also in setup.log
+                sys.stdout.log.write(f"      the reason: {s['segment_heap']['why']}\n")
     src = find_times(opt("--times"))
     fetch = not opt("--times") and "--no-times-source" not in args and (not src or times_version(src) != PORT_VERSION)
     fetch = fetch and bool(find_gams(opt("--gams")))        # the source serves only the comparison with TIMES in GAMS
@@ -1690,8 +1767,11 @@ def setup(args):
     gams = find_gams(opt("--gams"))
     if gams:
         s["gams"] = for_settings(gams)
-    s.pop("gams_lp", None)                                  # the LP solvers of the user's GAMS: found again by check below
+    s.pop("gams_lp", None)                                  # the LP solvers of the user's GAMS: listed again just below
     write(SETTINGS, json.dumps(s, indent=1))
+    lp_gams = gams_for_lp()
+    if lp_gams:                                             # one short GAMS run; kept in settings.json, shown by check
+        gams_lp_solvers(lp_gams, fresh=True)
     print("\nWhat is there now:\n")
     chain, _, _ = check()
     if not chain:
@@ -2313,7 +2393,8 @@ def one_case(folder, out_root, o, case=None):
     # the open chain reads the TIMES declarations carried with it (times_pp/timespp/times_src); the TIMES source folder
     # is needed only to run GAMS, and when there is one its declaration files should be the same ones
     if not src and gams:
-        notes.append("the TIMES source folder is not known (setup --times <folder>): GAMS is not run")
+        if o.get("check") or o.get("gams") == "run":        # (said only to a run that asks for GAMS)
+            notes.append("the TIMES source folder is not known (setup --times <folder>): GAMS is not run")
         gams = None
     elif src:
         R["environment"]["declarations_as_gams"] = declarations_differ(src)
@@ -2372,7 +2453,7 @@ def one_case(folder, out_root, o, case=None):
     pp_exe, heap = pp_python()
     R["environment"]["preprocessor_python"] = {"path": pp_exe, "heap": heap}
     if WIN and heap != "Segment Heap":
-        print(f"[{case}] {heap}", flush=True)
+        print(heap_at_run(case, heap), flush=True)
         notes.append(f"the preprocessor ran on Windows's default heap, about half as fast as on the Segment Heap: {heap}")
     db3_mode = setting("DB3", "beside2")
     go = os.path.join(out, "model.db3.go")
@@ -2409,7 +2490,7 @@ def one_case(folder, out_root, o, case=None):
         pp_env["TIMESPP_POINTS"] = os.pathsep.join(os.path.abspath(p) for p in points)
     pp_env["TIMESPP_RESULTS"] = os.pathsep.join(dict.fromkeys([out_root, default_out()]))
     # compared with a run of TIMES in GAMS: both start from the results of earlier runs that GAMS reads (refpoint.py)
-    if o["gams"] in ("run", "reuse") or (o["gams"] is None and bool(gams) and (bool(o["check"]) or not o["solve"])):
+    if o["gams"] in ("run", "reuse") or (o["gams"] is None and bool(gams) and bool(o["check"])):
         pp_env["TIMESPP_BASE_FROM_GAMS"] = "1"
     def release_db3():
         if db3_mode == "after" and not os.path.exists(go):
@@ -2489,20 +2570,28 @@ def one_case(folder, out_root, o, case=None):
     user_lst = sorted(glob.glob(os.path.join(folder, "*.lst")), key=os.path.getmtime)
     if chosen:                                                  # the other run files of the folder have their own listings
         user_lst = [f for f in user_lst if os.path.splitext(os.path.basename(f))[0].lower() == name.lower()]
-    # running GAMS is opt-in (--gams run), except with --no-solve or --check, which have no purpose without it
-    wants_gams = (not o["solve"] or bool(o["check"])) and bool(gams) and not ref_matrix
-    mode = o["gams"] or ("run" if wants_gams else "models" if os.path.exists(ref) else "reuse" if user_lst else "skip")
+    # GAMS only when it is asked for: --gams <mode>, --check (or `verify`), or the same in the settings file. Without
+    # them no GAMS is started and no GAMS result of the user's is read: a listing in the folder is only noted (the
+    # verdict names --gams reuse). A published reference of the models that come with TIMES-OS needs no GAMS.
+    wants_gams = bool(o["check"]) and bool(gams) and not ref_matrix
+    mode = o["gams"] or ("run" if wants_gams else "models" if os.path.exists(ref) else "skip")
+    if mode == "skip" and user_lst and not o["gams"]:
+        R["gams_listing_in_folder"] = os.path.basename(user_lst[-1])
     if o.get("milestones") and mode in ("models", "reuse"):
         # a published result or a listing in the folder is of the whole model, not of the reduced one
         mode = "run" if gams else "skip"
         notes.append("--milestones: the GAMS result in the folder is of the whole model; " +
                      ("GAMS is run on the reduced one instead" if gams else "nothing to compare with (GAMS not found)"))
-    if (not o["solve"] or o["check"]) and mode != "run" and not (mode == "models" and ref_matrix):
+    if o["check"] and mode != "run" and not (mode == "models" and ref_matrix):
         why = "GAMS was not found; give its place with: setup --gams <gams executable>" if not gams else f"--gams {mode} was given"
-        print(f"[{case}] {'--no-solve' if not o['solve'] else '--check'}, but GAMS is not run here ({why}): no GAMS matrix, so the model is not compared entry by entry", flush=True)
-        notes.append(f"{'--no-solve' if not o['solve'] else '--check'}, but GAMS was not run here ({why}): no GAMS matrix, so check 4 was not made")
+        print(f"[{case}] --check, but GAMS is not run here ({why}): no GAMS matrix, so the model is not compared entry by entry", flush=True)
+        notes.append(f"--check, but GAMS was not run here ({why}): no GAMS matrix, so check 4 was not made")
+    older = gams_older_note(gams) if mode == "run" and gams else ""
+    if older:                                                   # a note: the run goes on with this GAMS
+        print(f"[{case}] note: {older}", flush=True)
+        notes.append(older)
     G = None
-    if user_lst:
+    if user_lst and mode == "reuse":                            # (read only when asked: --gams reuse)
         u = parse_listing(user_lst[-1])
         newest_dd = max([os.path.getmtime(p) for _, p in dds] + [0])
         R["gams_existing"] = {k: u.get(k) for k in ("listing", "gams_version", "times_version", "rows", "columns", "nonzeros", "solver", "solver_status", "model_status", "objective")}
@@ -2526,11 +2615,11 @@ def one_case(folder, out_root, o, case=None):
         G, gdx = None, None
         if P["status"] != "ok" and mode == "run":
             notes.append("GAMS was not run: the model cannot be built by the port yet, so there is nothing to compare")
-            mode = "reuse" if user_lst else "skip"
+            mode = "skip"                               # (a listing in the folder is read only with --gams reuse)
         if mode == "run":
             if not gams:
                 notes.append(f"GAMS was not found, so it was not run ({PROG} setup --gams <gams executable>)")
-                mode = "reuse" if user_lst else "skip"
+                mode = "skip"
             elif not o["solve"]:                            # --no-solve: GAMS generates the model and writes its matrix; nothing is solved on either side
                 code, t, got = gams_matrix()
                 R["timings"]["gams"] = round(t, 1)
@@ -2878,11 +2967,26 @@ def infeasible_verdict(found, G, notes):
     return v
 
 
+def matrix_differences(M):
+    """What check 4 (the matrix, entry by entry) found different, with the counts: '32 column bounds (check 4)'."""
+    s = lambda n, one, many: f"{n:,} {one if n == 1 else many}"
+    parts = [s(n, one, many) for n, one, many in (
+        (M["entries_only_here"] + M["entries_only_gams"] + M["entries_different"], "coefficient", "coefficients"),
+        (M["rows_only_here"], "row only here", "rows only here"), (M["rows_only_gams"], "row only in GAMS", "rows only in GAMS"),
+        (M["columns_only_here"], "column only here", "columns only here"),
+        (M["columns_only_gams"], "column only in GAMS", "columns only in GAMS"),
+        (M["rhs_different"], "right-hand side or sense", "right-hand sides or senses"),
+        (M["bounds_different"], "column bound", "column bounds")) if n]
+    return (", ".join(parts) or "matrix") + " (check 4)"
+
+
 def judge(R, o):
     """The checks and the verdict from what the run recorded (R: preprocess, gams, julia; o: tolerance, solve). Made at
     the end of the run, and again after the matrix check (check_case), which adds its comparisons to R['julia'].
     While the matrix is not checked yet (R['phase'] 'timing'), the verdict is provisional: SAME OBJECTIVE, BUILT or
-    DIFFERENT OBJECTIVE."""
+    DIFFERENT OBJECTIVE. When anything differs (the checks of `diffs`, check 4 among them) in a model that was built,
+    the verdict is DIFFERENT, followed by what differs; why it was not solved, or what else went wrong, comes after it.
+    (UNSUPPORTED and a failed preprocessor come first: there is no model of this implementation to compare.)"""
     P, G, J = R.get("preprocess") or {}, R.get("gams"), R.get("julia")
     notes = R["judge_notes"] = []
     timing = R.get("phase") == "timing"
@@ -2997,13 +3101,16 @@ def judge(R, o):
             if not ent else f"only here {M['entries_only_here']:,}, only in GAMS {M['entries_only_gams']:,}, other value {M['entries_different']:,}") + how])
         R["checks"].append(["4", "matrix: rows and columns by name", "same" if not unm else "DIFFERENT", "",
                             "" if not unm else f"rows {M['rows_only_here']:,} only here, {M['rows_only_gams']:,} only in GAMS; columns {M['columns_only_here']:,} / {M['columns_only_gams']:,}"])
+        for n, what in ((M.get("rows_unnamed_gams"), "rows"), (M.get("columns_unnamed_gams"), "columns")):
+            if n:       # an older GAMS can leave some without a name in the dictionary of its matrix
+                notes.append(f"{n:,} {what} of GAMS have no name in its dictionary: they cannot be matched (counted as only in GAMS in check 4)")
         R["checks"].append(["4", "matrix: right-hand sides and senses", "same" if not M["rhs_different"] else "DIFFERENT", f"{M['rows_gams']:,} rows",
                             (f"{M['rhs_different']:,} differ" if M["rhs_different"] else "") +
                             (f"{'; ' if M['rhs_different'] else ''}{M['rhs_rounding']:,} equal within rounding of constants that cancel (decision 0007)"
                              if M.get("rhs_rounding") else "")])
         R["checks"].append(["4", "matrix: column bounds", "same" if not M["bounds_different"] else "DIFFERENT", f"{M['columns_gams']:,} columns",
                             "" if not M["bounds_different"] else f"{M['bounds_different']:,} differ"])
-        M["same_model"] or diffs.append("matrix")
+        M["same_model"] or diffs.append(matrix_differences(M))
     elif timing:
         R["checks"].append(["4", "matrix, entry by entry", "not yet", "", "a myopic run: compared step by step while it runs, with --check inline" if several else
                             f"after the timing: --check, or {PROG} verify <result folder>"])
@@ -3026,9 +3133,12 @@ def judge(R, o):
         if "not supported yet" in err:                       # found while the equations were written: one at a time
             R["checks"][0] = ["0", "all inputs supported", "NO", "unsupported (equations)", ""]
             return "UNSUPPORTED: " + err.replace("TIMES feature not supported yet: ", "the equations do not have yet: ")[:400]
-        if J.get("infeasible_rows"):
-            return infeasible_verdict(J["infeasible_rows"], G, notes)
-        return f"ERROR: Julia stopped in stage '{J.get('stage')}': {err[:300]}"
+        stopped = (infeasible_verdict(J["infeasible_rows"], G, notes) if J.get("infeasible_rows")
+                   else f"ERROR: Julia stopped in stage '{J.get('stage')}': {err[:300]}")
+        if M and not M["same_model"] and not stopped.startswith("DIFFERENT"):   # built, compared, then stopped
+            kind, why = stopped.split(": ", 1)
+            return "DIFFERENT: " + ", ".join(diffs) + f"; then {'infeasible' if kind == 'INFEASIBLE' else 'an error'} here ({why})"
+        return stopped
     if J.get("solve_skipped"):
         notes.append("not solved: " + J["solve_skipped"])
     if M and M["same_model"]:                                # the same linear program: what a solver makes of it is secondary
@@ -3052,22 +3162,31 @@ def judge(R, o):
     if (not o.get("solve", True) or J.get("solve_skipped")) and "termination" not in J:
         why = "too large for HiGHS, see NOTES" if J.get("solve_skipped") else "--no-solve"
         if diffs:
-            return "DIFFERENT: " + ", ".join(diffs)
+            return "DIFFERENT: " + ", ".join(diffs) + f"; not solved here ({why})"
         if C:
             return f"SAME: model size, rows, GAMS solution, reduced costs, right-hand sides and bounds agree; not solved here ({why})"
         if timing and G and G.get("rows") is not None and same_reduce(R, G):
             return f"BUILT: rows, columns and non-zeros are those of GAMS; not solved here ({why})" + pending
         return f"NOT SOLVED: built and not solved ({why}); " + ("the GAMS matrix was not read, so only the sizes are compared (see NOTES)" if G and G.get("rows") else "nothing to compare with")
     if J.get("termination") != "OPTIMAL" and not unproved:
-        built = (" Checks that differ: " + ", ".join(diffs) + ".") if diffs else (" The model itself agrees with GAMS in checks 1 and 3." if C else
+        if diffs:                                            # what differs first; why it was not solved after it
+            return "DIFFERENT: " + ", ".join(diffs) + f"; not solved here ({solver_name(J)} ended with {J.get('termination')})" + (pending if timing else "")
+        built = (" The model itself agrees with GAMS in checks 1 and 3." if C else
                  " Rows, columns and non-zeros are those of GAMS." if G and same_reduce(R, G) and G.get("rows") is not None else "")
         return f"NOT SOLVED: the model was built, and {solver_name(J)} ended with {J.get('termination')}." + built + (pending[1:].capitalize() + "." if timing else "")
     if not G:
-        return f"SOLVED: objective {J['objective']:.6f}; not compared with GAMS (--gams run to compare)"
+        lst = R.get("gams_listing_in_folder")
+        return (f"SOLVED: objective {J['objective']:.6f}; not compared with GAMS (" +
+                (f"a GAMS listing is in the run folder, {lst}: --gams reuse compares with it, --check runs GAMS and compares the two models)"
+                 if lst else "--gams run to compare)"))
     if G.get("objective") is None and G.get("matrix_only") and not G.get("errors"):
+        if diffs:                                            # check 4 (or the sizes) found a difference: no SOLVED
+            return "DIFFERENT: " + ", ".join(diffs) + f"; solved here, objective {J['objective']:.6f} (GAMS wrote its matrix, not solved)"
         return (f"SOLVED: objective {J['objective']:.6f}; rows, columns and non-zeros are those of GAMS (GAMS wrote its matrix, not solved)"
                 + (pending if timing else ""))
     if G.get("objective") is None:
+        if M and not M["same_model"]:                        # GAMS's matrix was read and differs (sizes from a failed run may not hold)
+            return "DIFFERENT: " + ", ".join(diffs) + f"; the GAMS run gave no objective ({gams_summary(G)})"
         return f"ERROR: the GAMS run gave no objective ({gams_summary(G)}; {'; '.join(G.get('errors', [])[:2]) or 'see the listing'}); Julia objective {J['objective']:.6f}"
     if diffs and own_start and all(d == "objective" or d.startswith("objective of step") for d in diffs):
         # not a difference of the model: the two runs start from two solutions of the earlier run
@@ -3361,7 +3480,46 @@ def drop_work(out, keep):
     shutil.rmtree(work, ignore_errors=True)
 
 
+def against_gams(R):
+    """Time to the solver and peak memory, here and in GAMS, and their ratio, from what the report already holds
+    (timings.to_highs; GAMS's seconds_to_solver; memory). GAMS's only when this run ran and timed GAMS; a number that
+    was not measured is left out. -> {"time_to_solver": {"here", "gams", "ratio"}, "peak_memory_gb": {...}} (may be empty)"""
+    G, MM = R.get("gams") or {}, R.get("memory") or {}
+    ran = G.get("mode") == "run now"
+    out = {}
+    for key, here, gams in (("time_to_solver", R["timings"].get("to_highs"), G.get("seconds_to_solver") if ran else None),
+                            ("peak_memory_gb", MM.get("port_gb"), MM.get("gams_gb") if ran else None)):
+        if here is None:
+            continue
+        out[key] = {"here": here}
+        if gams:
+            out[key].update(gams=gams, ratio=round(here / gams, 2))
+    return out
+
+
+def against_gams_lines(R):
+    """The block TIME AND MEMORY of the report: the numbers of against_gams, one line each, and what they are."""
+    A = R.get("against_gams") or against_gams(R)
+    if not A:
+        return []
+    both = any("gams" in v for v in A.values())
+    L = ["TIME AND MEMORY", (f"  {'':22}{'here':13}" + (f"{'GAMS':13}here / GAMS" if both else "")).rstrip()]
+    for key, what, fmt in (("time_to_solver", "time to the solver", "{:.1f} s"), ("peak_memory_gb", "peak memory", "{:.2f} GB")):
+        if key in A:
+            v = A[key]
+            L.append((f"  {what:22}{fmt.format(v['here']):13}" + (f"{fmt.format(v['gams']):13}{v['ratio']:.2f}" if "gams" in v else "")).rstrip())
+    lp = (R.get("memory") or {}).get("port_gams_gb") is not None
+    L.append("  time to the solver: from the start of the run to the solver's start; peak memory: the peak working set of the")
+    L.append("  processes of each run, summed" + (" (here: the GAMS that solves, --lp, included)" if lp else ""))
+    return L + [""]
+
+
 def write_report(out, R):
+    A = against_gams(R)
+    if A:
+        R["against_gams"] = A
+    else:
+        R.pop("against_gams", None)
     write(os.path.join(out, f"report_{R['case']}.json"), json.dumps(R, indent=1))
     write(os.path.join(out, f"report_{R['case']}.txt"), report_text(R))
 
@@ -3733,6 +3891,7 @@ def report_text(R):
     add("This file is written by TIMES.py. It is complete in itself: everything needed to understand")
     add("the result is below; the files it names are in the same folder.")
     add("")
+    L.extend(against_gams_lines(R))
     add("CHECKS")
     if R.get("gams"):
         add(f"  {'':3}{'check':40}{'result':20}{'Julia':24}GAMS")
@@ -3982,7 +4141,7 @@ SETTINGS_FILE = "times-os.toml"
 # texts and paths (a repeated option: a list), and switch-or-text (true, or the option's value).
 RUN_OPTIONS = {
     "out": ("path", "runs/ in the repository; installed: times-os-runs beside the run folders"),
-    "times": ("path", "the TIMES source that setup found"), "gams": ("text", "a GAMS result in the run folder is read"),
+    "times": ("path", "the TIMES source that setup found"), "gams": ("text", "skip: GAMS is not used unless asked (--gams, --check, verify)"),
     "solver": ("text", "auto"), "threads": ("int", "0 (as many as useful)"), "time-limit": ("number", "the run file's RESLIM"),
     "tolerance": ("number", "1e-06"), "check": ("switch-or-text", "false"), "no-solve": ("switch", "false"),
     "solve": ("switch", "false"), "max-solve-rows": ("number", "2000000"), "highs-option": ("texts", "none"),
@@ -4341,8 +4500,9 @@ def run(args, settings_files=True):
             if missing:
                 print("--check compares the model with TIMES in GAMS, which needs " + " and ".join(missing) + ".  Nothing was run.")
                 return 2
-    needs_gdx = o["gams"] in ("run", "reuse") or bool(o["check"]) or bool(o.get("jacobian")) or o["lp"] not in ("highs", "gurobipy") or (o["gams"] is None and any(      # the GDX reader is needed only when a GAMS run or listing is read;
-        glob.glob(os.path.join(d, "*.lst")) and not os.path.exists(os.path.join(d, "expected.json")) for d in (os.path.dirname(c) if is_run_file(c) else c for c in cases)))   # a published reference needs no GAMS at all
+    # the GDX reader is needed only when GAMS is run or a GAMS result read, which a run does only when asked (a listing
+    # in the folder is not read without --gams reuse); a published reference needs no GAMS at all
+    needs_gdx = o["gams"] in ("run", "reuse") or bool(o["check"]) or bool(o.get("jacobian")) or o["lp"] not in ("highs", "gurobipy")
     if needs_gdx:                                           # without the GDX reader no GAMS result can be compared: settle it before the long steps
         missing = [m for m in python_packages()[1] if m[0] in ("gams.transfer", "gamspy_base")]
         if missing and INSTALLED:       # installed by pip: the package's extra brings them
@@ -4425,6 +4585,9 @@ def case_list(given):
             return True
         if not os.path.isdir(f):
             print(f"not a folder or a run file: {f}" + (f" ({origin})" if origin else ""))
+            if not os.path.exists(f) and not f.lower().endswith(".run"):     # not there: perhaps the example, not yet copied
+                arg = f if " " not in f else f'"{f}"'
+                print(f"  {f} is not there. To put the example model DemoS_012 there: {PROG} example {arg}")
             return False
         if run_files(f):
             add(f, origin)

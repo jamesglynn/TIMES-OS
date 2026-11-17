@@ -169,7 +169,11 @@ def convert_jacobian(gdx, out, gams_dir=None):
     def names(sym, prefix):
         res = {}
         for label, text in sym.records.itertuples(index=False, name=None):
-            m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$", text.strip())
+            m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$", (text if isinstance(text, str) else "").strip())
+            if not m:       # no name in GAMS's dictionary: one row (column) of its own that matches nothing here
+                k = number(label, prefix)
+                res[label] = (k, "(NO NAME IN GAMS)", f"#{k}")
+                continue
             key = KEYSEP.join(_labels(m.group(2))) if m.group(2) else ""
             res[label] = (number(label, prefix), m.group(1).upper(), key.upper())
         return res

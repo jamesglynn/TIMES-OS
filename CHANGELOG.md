@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.2.0 (November 2026): GAMS only when asked, time and memory in the report, conda Pythons on Windows
+
+Fixes and changes from what the first users of 1.1.0 sent. One of them changes what a run does by default: a GAMS
+listing in the run folder is no longer compared with unless you ask (`--gams reuse`).
+
+#### Runs and the comparison with TIMES in GAMS
+
+- **GAMS only when asked.** A run starts GAMS, or reads a GAMS result in the run folder, only with `--check`,
+  `--gams run` or `reuse`, `verify`, or the same in `times-os.toml`. Before, a GAMS listing in the run folder (Veda
+  always leaves one) was read and compared with by default, with its notes about the GDX packages and about DD files
+  newer than the listing; now the run is not compared, and its verdict says the listing is there and names
+  `--gams reuse` (compare with it) and `--check` (run GAMS and compare the two models). `--no-solve` alone builds the
+  model without GAMS (with `--check`, as before). A published reference (`expected.json`, the models that come with
+  TIMES-OS) is compared with as before. Without GAMS, `setup` and `check` say so in one line; `check` never starts
+  GAMS: it shows the LP solvers of your GAMS's licence that `setup` listed. `TIMES_GAMS` now also gives the GAMS of the
+  comparison, as it gave that of `--lp` (`TIMES.py`, `one_case`, `check`, `setup`, `find_gams`).
+- The verdict is `DIFFERENT` whenever a comparison with GAMS differs, followed by what differs with the counts
+  (`DIFFERENT: 32 column bounds (check 4)`). Before, a run with `--check` whose matrix differed while GAMS only wrote
+  its matrix said `SOLVED`, and a run not solved, or stopped after the matrix was compared, said `NOT SOLVED` or
+  `ERROR`; why it was not solved now comes after what differs. `summary.txt` and the exit status (1) follow
+  (`TIMES.py`, `judge`, `matrix_differences`).
+- The report has a block TIME AND MEMORY before CHECKS: the time to the solver and the peak memory of this run, and,
+  when the run ran and timed GAMS, GAMS's and the ratio (`3.28` times GAMS's time). The numbers are those the report
+  already had; `report_<case>.json` has them under `against_gams` (`TIMES.py`, `against_gams`).
+- The comparison of the matrix with GAMS's no longer stops on a row or column that has no name in GAMS's dictionary
+  of its matrix (seen with GAMS 29.1.0): such rows and columns are counted, reported ("<n> rows of GAMS have no name
+  in its dictionary: they cannot be matched") and matched with nothing, so the model is never called the same while
+  they are there (`times_pp/tools/compare_jacobian.py`, `matrix_pq.py`, `gdx2sqlite.py`).
+- The comparison with GAMS has been run with GAMS 54.1.0. With an older GAMS, `check` and a run with `--check` say so
+  in one line; the run goes on (`TIMES.py`, `gams_older_note`).
+- `run <folder>` on a folder that is not there names the command that puts the example model there
+  (`times-os example <folder>`), for a user who typed `run demo` before `example demo` (`TIMES.py`, `case_list`).
+
+#### Setup
+
+- Windows, a conda Python: the preprocessor runs on the Segment Heap, as with python.org's Python (tried with
+  Miniforge; Miniconda and Anaconda keep their DLLs in the same place and were not tried yet). Before, the copy of the
+  interpreter that `setup` makes for it did not find the DLLs that conda keeps in `Library\bin` (`DLL load failed
+  while importing _ctypes`), and every run was on Windows's default heap, about half as fast. When the copy cannot be
+  made, `setup`, `check` and a run say so in one line with the cause in a few words; the full reason is in
+  `settings.json` (and, installed with pip, in `setup.log`) (`TIMES.py`, `make_segheap`, `segheap_cause`).
+- pandas 3 is tried: pandas 2.3.3, 3.0.6 and 3.1.1 give the same model and the same results; the requirements say so
+  (`requirements.txt`, `pyproject.toml`).
+
+#### Agreement fixes
+
+- The gross production of a commodity (`VAR_COMPRD`) is fixed at zero where TIMES fixes it (`bndmain.mod`): a
+  commodity whose production is a variable (`RCS_COMPRD` FX) but no longer in its balance (`RHS_COMPRD`), as REDUCE
+  leaves a commodity whose single producer is off in a period. Before, that production was free above zero; seen on a
+  16-region model whose CO2 storage commodity (COM_LIM FX) has no producer in the first periods: 32 column bounds
+  differed from GAMS's, and now the model is the same (`times_pp/timespp/prep/bounds.py`, `com_bounds`).
+- A record whose label is not in a domain set that has no members at all (a blend's `BL_TYPE`, `BL_SPEC`, `BL_COM`
+  over `SPE` when the model declares no `SPE`) is removed, as TIMES removes it: GAMS reports the domain violation
+  (error 170) and reloads the input through its GDX filter (`gdxfilter.gms`). Before, such records were kept when
+  the domain set was empty, and the model had blending rows and columns that TIMES does not build
+  (`times_pp/timespp/domfilter.py`). A domain set with members was filtered as before. On the
+  DemoS_012 example with a blend and no `SPE`, the matrix is that of TIMES in GAMS.
+
 ## 1.1.0 (November 2026): installing with pip (beta), a settings file for `run`, Julia 1.11 or newer
 
 #### Installing with pip (beta)

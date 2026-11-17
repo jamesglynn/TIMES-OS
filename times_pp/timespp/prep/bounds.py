@@ -493,6 +493,15 @@ def com_bounds(db: DB, window=False):
     sub = " and in_SUBT(a.y)" if window else ""
     _bounds(db, "VAR_COMNET", ["a.r", "a.y", "a.c", "a.s"], "COM_BNDNET", ["r", "y", "c", "s"], "in_RTCS_VARC(a.r,a.y,a.c,a.s)" + sub)
     _bounds(db, "VAR_COMPRD", ["a.r", "a.y", "a.c", "a.s"], "COM_BNDPRD", ["r", "y", "c", "s"], "in_RTCS_VARC(a.r,a.y,a.c,a.s)" + sub)
+    # --- %VAR%_COMPRD.FX(RTCS_VARC(R,T,C,S)%SOW%)$((NOT RHS_COMPRD(R,T,C,S))$RCS_COMPRD(R,T,C,S,'FX')) = EPS;
+    #     (RCS_COMPRD 'FX' is RHS_COMPRD as ppmain.mod left it; REDUCE YES then drops RHS_COMPRD where the single
+    #      producer of the commodity is off, pp_reduce.red, and the production is fixed at zero here)
+    db.tmp("t_prd_off", f"""select a.r, a.y, a.c, a.s from RCS_COMPRD a where a.l='FX' and in_RTCS_VARC(a.r,a.y,a.c,a.s)
+                            and not in_RHS_COMPRD(a.r,a.y,a.c,a.s){sub}""")
+    db.x("""update "B_VAR_COMPRD" b set lower = 0.0, upper = 0.0 from t_prd_off k
+            where b.d0=k.r and b.d1=k.y and b.d2=k.c and b.d3=k.s""")
+    db.x("""insert into "B_VAR_COMPRD" select k.r, k.y, k.c, k.s, 0.0, 0.0 from t_prd_off k
+            where not exists(select 1 from "B_VAR_COMPRD" b where b.d0=k.r and b.d1=k.y and b.d2=k.c and b.d3=k.s)""")
 
 
 def cum_bounds(db: DB):

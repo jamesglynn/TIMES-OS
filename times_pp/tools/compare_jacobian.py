@@ -28,6 +28,8 @@ import os, sys, json, time, re
 KEYSEP = "\x1f"                              # joins the labels of a row or column key
 TOL = 1e-9
 EPS64 = 64 * 2.220446049250313e-16           # 64 * eps(Float64)
+NONAME_GAMS = "(NO NAME IN GAMS)"            # the name of a row or column whose text in GAMS's dictionary gives none
+NONAME_HERE = "(NO NAME HERE)"
 
 
 def _duck(memory=None, temp=None):
@@ -173,14 +175,14 @@ def read_jacobian(con, gdx, side, system_directory=None):
     rows, cols, ents = ("orr", "oc", "oa") if side == "first" else ("gr", "gc", "ga")
     for table, idx, setname, sym in ((rows, "i", "i", "e"), (cols, "j", "j", "x")):
         s = c[setname].records
-        lab, text = s.iloc[:, 0].astype(str), s.iloc[:, 1].astype(str)
-        m = text.str.strip().str.extract(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$")
+        lab, text = s.iloc[:, 0].astype(str), s.iloc[:, 1].fillna("").astype(str)
+        m = text.str.strip().str.extract(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\((.*)\))?$")      # no match: no name (NULL)
         inner = m[1].fillna("")
         key = inner.str.replace(r"\s*,\s*", KEYSEP, regex=True).str.strip()
         q = inner.str.contains("['\"]", regex=True)
         if q.any():
             key[q] = [KEYSEP.join(_labels(t)) for t in inner[q]]
-        names = pd.DataFrame({"lb": lab.values, idx: numbers(lab).values, "name": m[0].str.upper().values,
+        names = pd.DataFrame({"lb": lab.values, idx: numbers(lab).values, "name": m[0].str.upper().astype(object).where(m[0].notna(), None).values,
                               "key": key.str.upper().values})
         df = c[sym].records
         vals = pd.DataFrame({"lb": df.iloc[:, 0].astype(str).values, "lo": df["lower"].to_numpy(), "up": df["upper"].to_numpy()})
@@ -213,14 +215,20 @@ def compare_core(con, here_columns, show=3, tol=TOL):
     q = lambda s: x(s).fetchall()
     near = lambda a, b: f"(({a} = {b}) or (isfinite({a}) and isfinite({b}) and abs({a} - {b}) <= {tol} * greatest(abs({a}), abs({b})) + 1e-12))"
     within = lambda a, b, s: f"(({a} = {b}) or (isfinite({a}) and isfinite({b}) and abs({a} - {b}) <= {EPS64} * {s}))"
+    # a row or column without a name (its text in the dictionary is empty or not NAME(labels)): kept, each on its own
+    # (key #<number>), under a name no equation or variable can have, so it matches nothing and is counted
+    unnamed = {t: q(f"select count(*) from {t} where name is null or name = ''")[0][0] for t in ("gr", "gc", "orr", "oc")}
+    named = lambda t, n, mark: (f"(select {n}, coalesce(nullif(name, ''), '{mark}') as name, "
+                                f"case when name is null or name = '' then '#' || {n} else key end as key, lo, up"
+                                + (", cancel" if t == "orr" else "") + f" from {t})")
     # GAMS's rows and columns by name and key (a key seen twice: the last, as a Dict keeps it)
-    x("create temp table grow as select name, key, arg_max(i, i) i, arg_max(lo, i) lo, arg_max(up, i) up from gr group by name, key")
-    x("create temp table gcol as select name, key, arg_max(j, j) j, arg_max(lo, j) lo, arg_max(up, j) up from gc group by name, key")
+    x(f"create temp table grow as select name, key, arg_max(i, i) i, arg_max(lo, i) lo, arg_max(up, i) up from {named('gr', 'i', NONAME_GAMS)} t group by name, key")
+    x(f"create temp table gcol as select name, key, arg_max(j, j) j, arg_max(lo, j) lo, arg_max(up, j) up from {named('gc', 'j', NONAME_GAMS)} t group by name, key")
     # this model's rows and columns -> GAMS's numbers (0: only here)
     x("create temp table rm as select o.i oi, o.name, o.key, o.lo, o.up, o.cancel, coalesce(g.i, 0) gi, g.lo glo, g.up gup "
-      "from orr o left join grow g using (name, key)")
+      f"from {named('orr', 'i', NONAME_HERE)} o left join grow g using (name, key)")
     x("create temp table cm as select row_number() over () pos, o.j oj, o.name, o.key, o.lo, o.up, coalesce(g.j, 0) gj, g.lo glo, g.up gup "
-      "from oc o left join gcol g using (name, key)")
+      f"from {named('oc', 'j', NONAME_HERE)} o left join gcol g using (name, key)")
     rows_gams, cols_gams = q("select count(*) from grow")[0][0], q("select count(*) from gcol")[0][0]
     rows_here = q("select count(*) from rm")[0][0]
     rows_only_here = q("select count(*) from rm where gi = 0")[0][0]
@@ -281,6 +289,9 @@ def compare_core(con, here_columns, show=3, tol=TOL):
     p("\nMatrix against GAMS, entry by entry")
     p(f"rows       here {rows_here}   GAMS {rows_gams}   only here {rows_only_here}   only in GAMS {rows_only_gams}")
     p(f"columns    here {here_columns}   GAMS {cols_gams}   only here {cols_only_here}   only in GAMS {cols_only_gams}")
+    for n, what, side in ((unnamed["gr"], "rows", "of GAMS"), (unnamed["gc"], "columns", "of GAMS"), (unnamed["orr"], "rows", "here"), (unnamed["oc"], "columns", "here")):
+        if n:
+            p(f"{n} {what} {side} have no name in {'its' if side == 'of GAMS' else 'the'} dictionary: they cannot be matched")
     p(f"entries    here {entries_here}   GAMS {entries_gams}   only here {extra}   only in GAMS {missing_}   other value {different}"
       + (f"   (largest relative difference {_sig3(worst)})" if different > 0 else ""))
     p(f"right-hand sides that differ {rhs_off}   column bounds that differ {bnd_off}"
@@ -305,6 +316,7 @@ def compare_core(con, here_columns, show=3, tol=TOL):
            "worst_relative_difference": worst, "rhs_different": rhs_off, "rhs_rounding": rhs_rounding, "bounds_different": bnd_off,
            "details": details, "examples": rhs + bnd, "tolerance": tol, "same_model": same, "largest_relative_difference_equal": largest,
            "entries_zero_both": zeros_both, "equations": equations,
+           "rows_unnamed_gams": unnamed["gr"], "columns_unnamed_gams": unnamed["gc"], "rows_unnamed_here": unnamed["orr"], "columns_unnamed_here": unnamed["oc"],
            "seconds": {"rows_columns": round(t1 - t0, 1), "entries": round(t2 - t1, 1), "all": round(time.time() - t0, 1)}}
     return res, "\n".join(out)
 

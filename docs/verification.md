@@ -47,8 +47,9 @@ objective value, once the model is solved, may differ within the solver's tolera
 linear program with its rows and columns in another order stops at its own tolerance (for CPLEX, up to about 2e-9
 relative with crossover and 2e-6 when its options stop the barrier without crossover).
 
-`--gams run` also solves the model in GAMS and compares the objectives; a GAMS listing already in the run folder, as
-Veda leaves it, is compared with in the same way, without running GAMS.
+`--gams run` also solves the model in GAMS and compares the objectives; `--gams reuse` compares in the same way with
+a GAMS listing already in the run folder, as Veda leaves it, without running GAMS. Without one of these options (or
+`--check`), a run does not use GAMS and reads no GAMS result of the run folder.
 
 ## Open reference models
 

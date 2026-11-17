@@ -94,7 +94,9 @@ def _keys(prefix, labels_texts):
     q = inner.fillna("").str.contains("['\"]", regex=True)
     if q.any():
         key[q] = [KEYSEP.join(gdx2sqlite._labels(s)) for s in inner[q]]
-    return gdx2sqlite.numbers(labels), m[0].str.upper(), key.str.upper()
+    # a text that is empty or not NAME(labels) gives no name (NULL): compare_jacobian.compare_core counts such rows and
+    # columns and matches them with nothing
+    return gdx2sqlite.numbers(labels), m[0].str.upper().astype(object).where(m[0].notna(), None), key.str.upper()
 
 
 def gams(gdx, out, gams_dir=None):
@@ -117,7 +119,7 @@ def gams(gdx, out, gams_dir=None):
     con = _duck()
     for table, idx, setname, sym, prefix in (("rows", "i", "i", "e", "e"), ("cols", "j", "j", "x", "x")):
         s = c[setname].records
-        n, nm, key = _keys(prefix, (s.iloc[:, 0].astype(str), s.iloc[:, 1].astype(str)))
+        n, nm, key = _keys(prefix, (s.iloc[:, 0].astype(str), s.iloc[:, 1].fillna("").astype(str)))
         names = pd.DataFrame({"label": s.iloc[:, 0].astype(str).values, idx: n.values, "name": nm.values, "key": key.values})
         df = c[sym].records
         vals = pd.DataFrame({"label": df.iloc[:, 0].astype(str).values, "lower": num(df["lower"].to_numpy()), "upper": num(df["upper"].to_numpy())})

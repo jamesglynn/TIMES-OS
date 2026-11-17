@@ -16,7 +16,9 @@ symbols are not reloaded. ppmain.mod then writes one line to the QA log:
 
 Here: the same records are removed, the same line goes to the QA log, and the records are listed
 in `db.domain_violations` in the form of the GAMS listing ("**** 170  Domain violation for element").
-A domain is checked when it names a one-dimensional set (or an alias of one) that has members.
+A domain is checked when it names a one-dimensional set (or an alias of one), also when that set has no members: GAMS
+checks a label against the set as declared, so with an empty domain set every record of the symbol violates it (a
+blend without SET SPE: BL_TYPE, BL_SPEC, BL_COM over SPE are all removed, and no EQG_BLND is built).
 
 With $SET DATAGDX NO there is no filter (setglobs.gms 13: $ IF NOT %DATAGDX%==YES $GOTO SYSD), and GAMS keeps the
 records: that is not ported, so such a run stops when there are any.
@@ -33,7 +35,7 @@ def _domain_sets(db: DB, sy):
         d = d.upper()
         d = db.alias.get(d, d)
         t = db.sym.get(d)
-        ok = d != "*" and t is not None and t.kind == "set" and len(t.cols) == 1 and d != sy.name and db.card(d) > 0
+        ok = d != "*" and t is not None and t.kind == "set" and len(t.cols) == 1 and d != sy.name
         out.append((col, d, t.cols[0]) if ok else None)
     return out
 

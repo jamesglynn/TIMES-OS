@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "times-os"
-version = "1.1.0"           # the release's version: written here by the export (scripts/publish_clone.ps1 -Version)
+version = "1.2.0"           # the release's version: written here by the export (scripts/publish_clone.ps1 -Version)
 description = "TIMES Open Stack: the TIMES energy system model without GAMS (DD files -> Python -> Julia/JuMP -> HiGHS -> Veda result files)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,7 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "duckdb<2",          # DuckDB 2.0 stops the preprocessor (an unfinished result before register): pinned until the code is adapted
-    "pandas",
+    "pandas",            # tried with pandas 2.3.3, 3.0.6 and 3.1.1: the same model, the same results
     "numpy",
 ]
 
